@@ -51,7 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_dry_run(capture_parser)
     add_root_dir(capture_parser)
     capture_parser.add_argument(
-        "paths", nargs="+", metavar="PATH", help="File(s) or directory(ies) to capture."
+        "paths",
+        nargs="*",
+        metavar="PATH",
+        help="File(s) or directory(ies) to capture (or `host:/path` for a remote file/directory). Required unless --remotes is given.",
     )
     capture_parser.add_argument(
         "--ignore",
@@ -66,6 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite an existing tracked file with different content.",
     )
+    capture_parser.add_argument(
+        "--remotes",
+        nargs="*",
+        default=None,
+        metavar="HOST",
+        help="Recapture the known files of the given remote host(s), or of every host when no value is given (each differing file is copied back from the host). A `host:/path` argument captures a specific remote file/directory.",
+    )
 
     deploy_parser = sub.add_parser(
         "deploy", help="Create symlinks for the tracked files."
@@ -75,15 +85,22 @@ def build_parser() -> argparse.ArgumentParser:
     add_root_dir(deploy_parser)
     deploy_parser.add_argument(
         "paths",
-        nargs="+",
+        nargs="*",
         metavar="PATH",
-        help="File(s) or directory(ies) to deploy (required).",
+        help="File(s) or directory(ies) to deploy (target path, tracked path, `host:/path` or `remotes/...`). Required unless --remotes is given.",
     )
     deploy_parser.add_argument(
         "-f",
         "--force",
         action="store_true",
         help="Replace a conflicting target file even if it differs.",
+    )
+    deploy_parser.add_argument(
+        "--remotes",
+        nargs="*",
+        default=None,
+        metavar="HOST",
+        help="Deploy the tracked files of the given remote host(s) to the host, or of every host when no value is given (each differing file is copied, only if it differs).",
     )
 
     eject_parser = sub.add_parser(
@@ -110,6 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="*",
         metavar="PATH",
         help="Restrict the report to the given file(s) (target path or tracked path).",
+    )
+    status_parser.add_argument(
+        "--remotes",
+        nargs="*",
+        default=None,
+        metavar="HOST",
+        help="Report the remote files that differ from their tracked copies instead of the local problems (given host(s), or every host when no value).",
     )
 
     ignore_parser = sub.add_parser(
@@ -157,6 +181,13 @@ def build_parser() -> argparse.ArgumentParser:
         ],
         help="Only fix the problems of this type (repeatable).",
     )
+    fix_parser.add_argument(
+        "--remotes",
+        nargs="*",
+        default=None,
+        metavar="HOST",
+        help="Fix the remote differences instead of the local problems (given host(s), or every host when no value; deploy/capture/diff per file, same REPL as local drift).",
+    )
 
     diff_parser = sub.add_parser(
         "diff",
@@ -175,12 +206,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_base_dir(ls_parser)
     add_root_dir(ls_parser)
+    ls_parser.add_argument(
+        "--remotes",
+        nargs="*",
+        default=None,
+        metavar="HOST",
+        help="List the tracked files of the given remote host(s) as `host:/path` (or every host when no value).",
+    )
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "capture" and not args.paths and args.remotes is None:
+        parser.error("capture requires at least one PATH or --remotes")
+    if args.command == "deploy" and not args.paths and args.remotes is None:
+        parser.error("deploy requires at least one PATH or --remotes")
     if args.command == "capture":
         return capture(
             args.base_dir,
@@ -189,21 +232,27 @@ def main(argv: list[str] | None = None) -> int:
             args.force,
             args.dry_run,
             args.root_dir,
+            remotes=args.remotes,
         )
     if args.command == "deploy":
         return deploy(
-            args.base_dir, args.paths, args.force, args.dry_run, args.root_dir
+            args.base_dir,
+            args.paths,
+            args.force,
+            args.dry_run,
+            args.root_dir,
+            remotes=args.remotes,
         )
     if args.command == "eject":
         return eject(args.base_dir, args.paths, args.dry_run, args.root_dir)
     if args.command == "status":
-        return status(args.base_dir, args.paths, args.root_dir)
+        return status(args.base_dir, args.paths, args.root_dir, args.remotes)
     if args.command == "ignore":
         return ignore(args.base_dir, args.paths, args.dry_run, args.root_dir)
     if args.command == "diff":
         return diff(args.base_dir, args.path, args.root_dir)
     if args.command == "ls":
-        return ls(args.base_dir, args.root_dir)
+        return ls(args.base_dir, args.root_dir, args.remotes)
     if args.command == "fix":
         return fix(
             args.base_dir,
@@ -212,5 +261,6 @@ def main(argv: list[str] | None = None) -> int:
             args.root_dir,
             args.defaults,
             args.only,
+            args.remotes,
         )
     return 0

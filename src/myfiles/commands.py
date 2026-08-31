@@ -3,14 +3,17 @@
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, cast
 
 import pathspec
 import xdg_base_dirs
 
-from myfiles.fs import iter_tracked_files, prune_empty_dirs, same_content
+from myfiles import remote
+from myfiles.fs import hash_file, iter_tracked_files, prune_empty_dirs, same_content
 from myfiles.git import is_dirty
 from myfiles.paths import (
     BASE_DIR_NAME,
@@ -154,13 +157,74 @@ def capture(
     force: bool,
     dry_run: bool,
     root: str = "/",
+    remotes: list[str] | None = None,
 ) -> int:
-    """Move files into ``base_dir``, then deploy symlinks for them."""
+    """Move files into ``base_dir``, then deploy symlinks for them.
+
+    ``host:/path`` arguments capture remote files/directories (copied from the
+    host into ``remotes/<host>``, no symlinks). ``--remotes`` (optional host
+    names, or all hosts when no value) recaptures every known remote file whose
+    content differs from the host. The raw ``--remotes`` values may include
+    positional-looking tokens swallowed by argparse's ``nargs="*"``: path-like
+    ones are moved back to ``paths``.
+    """
     _announce_dry_run(dry_run)
     base_dir = resolve_base_dir(base_dir)
     if base_dir is None:
         return 1
     root = absolute(root)
+    if remotes is not None:
+        hosts, stray = _split_remote_hosts(remotes)
+        paths = stray + paths
+        remotes = hosts
+
+    remote_paths = [
+        parsed for arg in paths if (parsed := remote.parse_remote_arg(arg)) is not None
+    ]
+    local_paths = [arg for arg in paths if remote.parse_remote_arg(arg) is None]
+
+    rc = 0
+    if remote_paths:
+        rc = _capture_remote_paths(base_dir, remote_paths, dry_run)
+    if local_paths:
+        rc = max(
+            rc, _capture_local(base_dir, local_paths, ignore, force, dry_run, root)
+        )
+    if remotes is not None:
+        rc = max(rc, _capture_remote_scan(base_dir, remotes, dry_run))
+    return rc
+
+
+def _split_remote_hosts(remotes: list[str]) -> tuple[list[str], list[str]]:
+    """Split raw ``--remotes`` values into ``(hosts, stray_paths)``.
+
+    Argparse's ``nargs="*"`` greedily swallows the positional-looking tokens
+    that follow ``--remotes``; path-like ones (a leading ``/``, any ``/``, or a
+    ``host:/...`` form) are moved back to the positional paths.
+    """
+    hosts: list[str] = []
+    stray: list[str] = []
+    for value in remotes:
+        if (
+            value.startswith("/")
+            or "/" in value
+            or remote.parse_remote_arg(value) is not None
+        ):
+            stray.append(value)
+        else:
+            hosts.append(value)
+    return hosts, stray
+
+
+def _capture_local(
+    base_dir: str,
+    paths: list[str],
+    ignore: list[str],
+    force: bool,
+    dry_run: bool,
+    root: str,
+) -> int:
+    """Local capture: move files into ``base_dir``, then deploy symlinks for them."""
     plan: list[tuple[str, str, bool]] = []  # (real_src, rel, already_present)
     errors: list[str] = []
     infos: list[str] = []
@@ -285,14 +349,75 @@ def _plan_capture_tail(
 
 
 def deploy(
-    base_dir: str | None, paths: list[str], force: bool, dry_run: bool, root: str = "/"
+    base_dir: str | None,
+    paths: list[str],
+    force: bool,
+    dry_run: bool,
+    root: str = "/",
+    remotes: list[str] | None = None,
 ) -> int:
-    """Create symlinks for the tracked files in ``base_dir``."""
+    """Create symlinks for the tracked files in ``base_dir``.
+
+    ``host:/path`` and ``remotes/...`` paths deploy the tracked remote files to
+    the host instead (copied, only when they differ — no symlinks on a remote).
+    ``--remotes`` (optional host names, or all hosts when no value) deploys
+    every known remote file of those hosts to the host.
+    """
     _announce_dry_run(dry_run)
     base_dir = resolve_base_dir(base_dir)
     if base_dir is None:
         return 1
     root = absolute(root)
+    if remotes is not None:
+        hosts, stray = _split_remote_hosts(remotes)
+        paths = stray + paths
+        remotes = hosts
+    rc = 0
+    if remotes is not None:
+        rc = _deploy_remote_scan(base_dir, remotes, dry_run)
+    if paths:
+        remote_sel, local_paths = _split_remote_selection(base_dir, paths)
+        if remote_sel:
+            rc = max(rc, _deploy_remote(base_dir, remote_sel, dry_run))
+        if local_paths:
+            rc = max(rc, _deploy_local(base_dir, local_paths, force, dry_run, root))
+    elif remotes is None:
+        # No PATH and no --remotes: deploy everything locally (existing
+        # behavior, e.g. `myfiles deploy` invoked internally without paths).
+        rc = max(rc, _deploy_local(base_dir, [], force, dry_run, root))
+    return rc
+
+
+def _deploy_remote_scan(base_dir: str, hosts: list[str], dry_run: bool) -> int:
+    """Deploy every known remote file of the given hosts (or all hosts) to the host.
+
+    Each tracked file under ``remotes/<host>`` is copied to the host only when
+    its content differs (missing remote parents are created). An unknown host
+    is an error.
+    """
+    errors = _validate_remote_hosts(base_dir, hosts)
+    if errors:
+        for error in errors:
+            print(f"error: {error}")
+        return 1
+    known = remote.iter_remote_files(base_dir)
+    if hosts:
+        wanted = set(hosts)
+        known = [(h, r) for h, r in known if h in wanted]
+    if not known:
+        print("nothing to deploy")
+        return 0
+    return _deploy_remote(base_dir, known, dry_run)
+
+
+def _deploy_local(
+    base_dir: str,
+    paths: list[str],
+    force: bool,
+    dry_run: bool,
+    root: str,
+) -> int:
+    """Local deploy: create the symlinks for the tracked files in ``base_dir``."""
     rels = _select_rels(base_dir, paths)
     if not rels:
         print("nothing to deploy")
@@ -317,6 +442,40 @@ def deploy(
     return 0 if rc == 2 else rc
 
 
+def _split_remote_selection(
+    base_dir: str, paths: list[str]
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Split ``paths`` into remote ``(host, rel)`` selections and local paths.
+
+    A path is remote when it uses the ``host:/abs/path`` syntax, is inside the
+    ``remotes/`` directory, or is a root-relative ``remotes/...`` path.
+    """
+    remote_sel: list[tuple[str, str]] = []
+    local_paths: list[str] = []
+    for p in paths:
+        parsed = remote.parse_remote_arg(p)
+        if parsed is not None:
+            host, remote_path = parsed
+            remote_sel.append((host, remote.remote_rel(remote_path)))
+            continue
+        resolved = absolute(p)
+        if is_within(remote.remotes_dir_for_base(base_dir), resolved):
+            host, _, sub = os.path.relpath(
+                resolved, remote.remotes_dir_for_base(base_dir)
+            ).partition("/")
+            remote_sel.append((host, sub))
+            continue
+        norm = os.path.normpath(os.path.expanduser(p).lstrip("/"))
+        if norm.startswith(remote.REMOTES_DIR_NAME + "/"):
+            host, _, sub = (
+                norm[len(remote.REMOTES_DIR_NAME) :].lstrip("/").partition("/")
+            )
+            remote_sel.append((host, sub))
+            continue
+        local_paths.append(p)
+    return remote_sel, local_paths
+
+
 def _repo_gitignore_spec(base_dir: str) -> pathspec.PathSpec[Any] | None:
     """Return the gitignore spec for the repository root's ``.gitignore`` (or ``None``)."""
     repo_root = os.path.dirname(base_dir)
@@ -334,22 +493,57 @@ def _repo_gitignore_spec(base_dir: str) -> pathspec.PathSpec[Any] | None:
     )
 
 
-def ls(base_dir: str | None, root: str = "/") -> int:
+def ls(base_dir: str | None, root: str = "/", remotes: list[str] | None = None) -> int:
     """List the tracked files as target paths (leading ``/``), one per line.
 
     Files matching the repository's ``.gitignore`` are not shown: only the
-    files git actually versions are listed.
+    files git actually versions are listed. With ``--remotes`` (optional host
+    names, or every host when no value), the tracked remote files are listed
+    instead, as ``host:/path``.
     """
     base_dir = resolve_base_dir(base_dir)
     if base_dir is None:
         return 1
     root = absolute(root)
+    if remotes is not None:
+        hosts, _stray = _split_remote_hosts(remotes)
+        return _ls_remote(base_dir, hosts)
     spec = _repo_gitignore_spec(base_dir)
     for rel in iter_tracked_files(base_dir):
         if spec is not None and spec.match_file(os.path.join(BASE_DIR_NAME, rel)):
             continue  # gitignored: not versioned
         print(relative_to_target(rel, root))
     return 0
+
+
+def _ls_remote(base_dir: str, hosts: list[str]) -> int:
+    """List the tracked remote files of ``hosts`` (all hosts when empty) as ``host:/path``."""
+    errors = _validate_remote_hosts(base_dir, hosts)
+    if errors:
+        for error in errors:
+            print(f"error: {error}")
+        return 1
+    spec = _repo_gitignore_spec(base_dir)
+    files = remote.iter_remote_files(base_dir)
+    if hosts:
+        wanted = set(hosts)
+        files = [(h, r) for h, r in files if h in wanted]
+    for host, rel in files:
+        if spec is not None and spec.match_file(
+            os.path.join(remote.REMOTES_DIR_NAME, host, rel)
+        ):
+            continue  # gitignored: not versioned
+        print(remote.format_remote(host, "/" + rel))
+    return 0
+
+
+def _validate_remote_hosts(base_dir: str, hosts: list[str]) -> list[str]:
+    """Return error messages for the hosts that have no ``remotes/<host>`` directory."""
+    return [
+        f"{host}: not a known remote (no {remote.REMOTES_DIR_NAME}/{host} directory)"
+        for host in hosts
+        if not os.path.isdir(remote.host_dir(base_dir, host))
+    ]
 
 
 GITIGNORE_HEADER = "# managed by myfiles — add entries with `myfiles ignore <path>`"
@@ -492,9 +686,20 @@ def eject(
 
 
 def status(
-    base_dir: str | None, paths: list[str] | None = None, root: str = "/"
+    base_dir: str | None,
+    paths: list[str] | None = None,
+    root: str = "/",
+    remotes: list[str] | None = None,
 ) -> int:
-    """Report the state of tracked files (all of them, or only the given paths)."""
+    """Report the state of tracked files (all of them, or only the given paths).
+
+    With ``--remotes`` (optional host names, or every host when no value),
+    report the remote files that differ from their tracked copies instead of
+    the local problems.
+    """
+    if remotes is not None:
+        hosts, stray = _split_remote_hosts(remotes)
+        return _status_remote(base_dir, paths, root, hosts, stray)
     base_dir = resolve_base_dir(base_dir)
     if base_dir is None:
         return 1
@@ -639,6 +844,7 @@ def fix(
     root: str = "/",
     defaults: bool = False,
     only: list[str] | None = None,
+    remotes: list[str] | None = None,
 ) -> int:
     """Resolve the status problems, one by one.
 
@@ -654,8 +860,13 @@ def fix(
     ``only``, only the problems of the given type(s) (e.g. ``dangling``,
     ``drift``). ``defaults`` runs non-interactively and applies the default
     action of every problem (problems without a default — ``drift`` — and
-    non-auto-fixable ones are skipped).
+    non-auto-fixable ones are skipped). With ``--remotes`` (optional host
+    names, or every host when no value), the remote differences are fixed
+    instead (deploy/capture/diff per file).
     """
+    if remotes is not None:
+        hosts, stray = _split_remote_hosts(remotes)
+        return _fix_remote(base_dir, dry_run, paths, root, defaults, hosts, stray)
     _announce_dry_run(dry_run)
     base_dir = resolve_base_dir(base_dir)
     if base_dir is None:
@@ -825,13 +1036,25 @@ def diff(base_dir: str | None, path: str, root: str = "/") -> int:
     """Compare a system file with its tracked copy (like ``diff -Naur``).
 
     The tracked copy is the ``before`` side and the system file the ``after``
-    side.
+    side. A ``host:/path`` (or a tracked path under ``remotes/``) compares a
+    tracked remote file with its remote copy, which is first downloaded into a
+    temporary directory.
     """
     base_dir = resolve_base_dir(base_dir)
     if base_dir is None:
         return 1
     root = absolute(root)
+    parsed = remote.parse_remote_arg(path)
+    if parsed is not None:
+        host, remote_path = parsed
+        rel = remote.remote_rel(remote_path)
+        return _run_remote_diff(host, remote_path, _remote_tracked(base_dir, host, rel))
     resolved = absolute(path)
+    if is_within(remote.remotes_dir_for_base(base_dir), resolved):
+        host, _, sub = os.path.relpath(
+            resolved, remote.remotes_dir_for_base(base_dir)
+        ).partition("/")
+        return _run_remote_diff(host, "/" + sub, _remote_tracked(base_dir, host, sub))
     if is_within(base_dir, resolved):
         # The path is a tracked file inside the base directory.
         tracked = resolved
@@ -846,8 +1069,24 @@ def diff(base_dir: str | None, path: str, root: str = "/") -> int:
 
 
 def _run_diff(tracked: str, target: str) -> int:
+    return _run_diff_with_labels(tracked, target, tracked, target)
+
+
+def _run_diff_with_labels(
+    before: str, after: str, label_before: str, label_after: str
+) -> int:
     try:
-        result = subprocess.run(["diff", "-Naur", tracked, target], check=False)
+        result = subprocess.run(
+            [
+                "diff",
+                "-Naur",
+                f"--label={label_before}",
+                f"--label={label_after}",
+                before,
+                after,
+            ],
+            check=False,
+        )
     except FileNotFoundError, OSError:
         print("error: the `diff` command is not available")
         return 1
@@ -1549,3 +1788,436 @@ def _apply_eject_missing(target: str, tracked: str, base_dir: str) -> None:
     _copyfile(tracked, target)
     _remove(tracked)
     prune_empty_dirs(os.path.dirname(tracked), base_dir)
+
+
+# --------------------------------------------------------------------------- #
+# remote helpers (remotes/<host> mirrored via SSH, no symlinks)
+# --------------------------------------------------------------------------- #
+
+
+def _remote_tracked(base_dir: str, host: str, rel: str) -> str:
+    """Return the tracked path of a remote file under ``remotes/<host>``."""
+    return os.path.join(remote.host_dir(base_dir, host), rel)
+
+
+def _capture_remote_paths(
+    base_dir: str, sel: list[tuple[str, str]], dry_run: bool
+) -> int:
+    """Capture remote files/directories given as ``host:/path``.
+
+    The remote content is copied into ``remotes/<host>`` (only files that
+    differ); there are no symlinks on a remote host.
+    """
+    actions: list[Action] = []
+    infos: list[str] = []
+    errors: list[str] = []
+    for host, remote_path in sel:
+        if not remote.remote_lexists(host, remote_path):
+            errors.append(f"{remote.format_remote(host, remote_path)} does not exist")
+            continue
+        rel = remote.remote_rel(remote_path)
+        tracked = _remote_tracked(base_dir, host, rel)
+        if remote.remote_isdir(host, remote_path):
+            try:
+                files = remote.remote_walk(host, remote_path)
+            except remote.RemoteError as exc:
+                errors.append(str(exc))
+                continue
+            for f in files:
+                sub = os.path.relpath(f, remote_path)
+                _plan_remote_download(
+                    host, f, os.path.join(tracked, sub), actions, infos
+                )
+        else:
+            _plan_remote_download(host, remote_path, tracked, actions, infos)
+    rc = _execute(actions, infos, errors, dry_run)
+    return 0 if rc == 2 else rc
+
+
+def _capture_remote_scan(base_dir: str, hosts: list[str], dry_run: bool) -> int:
+    """Recapture the known remote files of the given hosts (or all hosts).
+
+    A known file (a file under ``remotes/<host>``) is copied back from the host
+    only when its content differs.
+    """
+    actions: list[Action] = []
+    infos: list[str] = []
+    errors: list[str] = []
+    known = remote.iter_remote_files(base_dir)
+    if hosts:
+        errors.extend(_validate_remote_hosts(base_dir, hosts))
+        wanted = set(hosts)
+        known = [(h, r) for h, r in known if h in wanted]
+    if not known and not errors:
+        print("nothing to capture")
+        return 0
+    for host, rel in known:
+        remote_path = "/" + rel
+        tracked = _remote_tracked(base_dir, host, rel)
+        if not remote.remote_lexists(host, remote_path):
+            infos.append(
+                f"skip (not on remote): {remote.format_remote(host, remote_path)}"
+            )
+            continue
+        _plan_remote_download(host, remote_path, tracked, actions, infos)
+    rc = _execute(actions, infos, errors, dry_run)
+    return 0 if rc == 2 else rc
+
+
+def _plan_remote_download(
+    host: str,
+    remote_path: str,
+    tracked: str,
+    actions: list[Action],
+    infos: list[str],
+) -> None:
+    """Plan copying a remote file into the repo (only when the content differs)."""
+    remote_h = remote.remote_hash(host, remote_path)
+    if remote_h is None:
+        infos.append(f"skip (not on remote): {remote.format_remote(host, remote_path)}")
+        return
+    local_h = hash_file(tracked) if os.path.isfile(tracked) else None
+    if remote_h == local_h:
+        infos.append(f"skip (identical): {remote.format_remote(host, remote_path)}")
+        return
+    actions.append(
+        Action(
+            f"copy {remote.format_remote(host, remote_path)} -> {display_path(tracked)}",
+            lambda h=host, r=remote_path, t=tracked: _apply_remote_download(h, r, t),
+        )
+    )
+
+
+def _plan_remote_upload(
+    host: str,
+    remote_path: str,
+    tracked: str,
+    actions: list[Action],
+    infos: list[str],
+) -> None:
+    """Plan copying a tracked remote file to the host (only when it differs)."""
+    local_h = hash_file(tracked)
+    if remote.remote_hash(host, remote_path) == local_h:
+        infos.append(f"skip (identical): {remote.format_remote(host, remote_path)}")
+        return
+    actions.append(
+        Action(
+            f"copy {display_path(tracked)} -> {remote.format_remote(host, remote_path)}",
+            lambda h=host, r=remote_path, t=tracked: _apply_remote_upload(h, r, t),
+        )
+    )
+
+
+def _apply_remote_download(host: str, remote_path: str, tracked: str) -> None:
+    _makedirs(os.path.dirname(tracked))
+    remote.remote_download(host, remote_path, tracked)
+
+
+def _apply_remote_upload(host: str, remote_path: str, tracked: str) -> None:
+    remote.remote_mkdirs(host, os.path.dirname(remote_path))
+    remote.remote_upload(tracked, host, remote_path)
+
+
+def _remote_sel(
+    base_dir: str,
+    paths: list[str],
+    hosts: list[str] | None = None,
+) -> list[tuple[str, str]]:
+    """Return the ``(host, rel)`` remote files selected by ``paths`` (all when empty).
+
+    ``hosts`` (when non-empty) restricts the selection to those hosts. Accepts
+    ``host:/path``, a path inside the ``remotes/`` directory, or a
+    root-relative ``remotes/...`` path; a directory selects everything under it.
+    """
+    all_files = remote.iter_remote_files(base_dir)
+    if hosts:
+        wanted = set(hosts)
+        all_files = [(h, r) for h, r in all_files if h in wanted]
+    if not paths:
+        return all_files
+    known = all_files
+    selected: set[tuple[str, str]] = set()
+    for p in paths:
+        parsed = remote.parse_remote_arg(p)
+        if parsed is not None:
+            host, remote_path = parsed
+            _remote_sel_one(known, selected, host, remote.remote_rel(remote_path))
+            continue
+        resolved = absolute(p)
+        if is_within(remote.remotes_dir_for_base(base_dir), resolved):
+            host, _, sub = os.path.relpath(
+                resolved, remote.remotes_dir_for_base(base_dir)
+            ).partition("/")
+            _remote_sel_one(known, selected, host, sub)
+            continue
+        norm = os.path.normpath(os.path.expanduser(p).lstrip("/"))
+        if norm.startswith(remote.REMOTES_DIR_NAME + "/"):
+            host, _, sub = (
+                norm[len(remote.REMOTES_DIR_NAME) :].lstrip("/").partition("/")
+            )
+            _remote_sel_one(known, selected, host, sub)
+    return sorted(selected)
+
+
+def _remote_sel_one(
+    known: list[tuple[str, str]],
+    selected: set[tuple[str, str]],
+    host: str,
+    rel: str,
+) -> None:
+    """Add a ``(host, rel)`` selection to ``selected``, expanding directories."""
+    prefix = rel + "/"
+    matches = [
+        (h, r) for h, r in known if h == host and (r == rel or r.startswith(prefix))
+    ]
+    if matches:
+        selected.update(matches)
+    else:
+        selected.add((host, rel))
+
+
+def _deploy_remote(base_dir: str, sel: list[tuple[str, str]], dry_run: bool) -> int:
+    """Deploy tracked remote files to the host (copied, only when they differ)."""
+    plan: set[tuple[str, str]] = set()
+    for host, rel in sel:
+        tracked = _remote_tracked(base_dir, host, rel)
+        if os.path.isdir(tracked) and not os.path.islink(tracked):
+            prefix = rel + "/"
+            plan.update(
+                (h, r)
+                for h, r in remote.iter_remote_files(base_dir)
+                if h == host and r.startswith(prefix)
+            )
+        else:
+            plan.add((host, rel))
+    actions: list[Action] = []
+    infos: list[str] = []
+    errors: list[str] = []
+    for host, rel in sorted(plan):
+        tracked = _remote_tracked(base_dir, host, rel)
+        if not os.path.isfile(tracked) or os.path.islink(tracked):
+            infos.append(
+                f"skip {remote.format_remote(host, '/' + rel)}: not a tracked file"
+            )
+            continue
+        _plan_remote_upload(host, "/" + rel, tracked, actions, infos)
+    rc = _execute(actions, infos, errors, dry_run)
+    return 0 if rc == 2 else rc
+
+
+def _run_remote_diff(host: str, remote_path: str, tracked: str) -> int:
+    """Diff a tracked remote file against its remote copy (downloaded to a temp dir)."""
+    if not remote.remote_lexists(host, remote_path):
+        print(f"error: {remote.format_remote(host, remote_path)} does not exist")
+        return 1
+    with tempfile.TemporaryDirectory() as tmp:
+        downloaded = os.path.join(tmp, "remote")
+        try:
+            remote.remote_download(host, remote_path, downloaded)
+        except remote.RemoteError as exc:
+            print(f"error: {exc}")
+            return 1
+        return _run_diff_with_labels(
+            tracked,
+            downloaded,
+            display_path(tracked),
+            remote.format_remote(host, remote_path),
+        )
+
+
+def _status_remote(
+    base_dir: str | None,
+    paths: list[str] | None,
+    root: str,
+    hosts: list[str] | None = None,
+    stray: list[str] | None = None,
+) -> int:
+    """Report the remote files that differ from their tracked copies.
+
+    ``hosts`` (when non-empty) restricts the report to those hosts; ``stray``
+    are positional-looking paths swallowed by ``--remotes``'s ``nargs="*"`` and
+    moved back into the selection. For a differing file, the two modification
+    dates are shown and the most recent one is marked; a tracked file missing
+    on the host is reported as ``missing``. Returns ``1`` when any remote file
+    differs.
+    """
+    base_dir = resolve_base_dir(base_dir)
+    if base_dir is None:
+        return 1
+    if stray:
+        paths = (paths or []) + stray
+    errors = _validate_remote_hosts(base_dir, hosts or [])
+    if errors:
+        for error in errors:
+            print(f"error: {error}")
+        return 1
+    problems = 0
+    for host, rel in _remote_sel(base_dir, paths or [], hosts=hosts):
+        remote_path = "/" + rel
+        tracked = _remote_tracked(base_dir, host, rel)
+        if not os.path.isfile(tracked) or os.path.islink(tracked):
+            print(f"not tracked {remote.format_remote(host, remote_path)}")
+            problems += 1
+            continue
+        if not remote.remote_lexists(host, remote_path):
+            print(f"missing {remote.format_remote(host, remote_path)}")
+            problems += 1
+            continue
+        if remote.remote_hash(host, remote_path) == hash_file(tracked):
+            continue  # identical: hidden
+        print(f"drift {remote.format_remote(host, remote_path)}")
+        _print_remote_dates(
+            os.path.getmtime(tracked), remote.remote_mtime(host, remote_path)
+        )
+        problems += 1
+    if problems:
+        print()
+        print(
+            "hint: run 'myfiles fix --remotes' to resolve these differences "
+            "interactively"
+        )
+    return 1 if problems else 0
+
+
+def _print_remote_dates(local_m: float, remote_m: float | None) -> None:
+    """Print the local/remote modification dates, marking the most recent."""
+
+    def fmt(m: float | None) -> str:
+        if m is None:
+            return "missing"
+        tz = datetime.now().astimezone().tzinfo
+        return datetime.fromtimestamp(m, tz).strftime("%Y-%m-%d %H:%M:%S")
+
+    local_s = fmt(local_m)
+    remote_s = fmt(remote_m)
+    if remote_m is not None and remote_m > local_m:
+        remote_s += " (newer)"
+    else:
+        local_s += " (newer)"
+    print(f"    local:  {local_s}")
+    print(f"    remote: {remote_s}")
+
+
+def _fix_remote(
+    base_dir: str | None,
+    dry_run: bool,
+    paths: list[str] | None,
+    root: str,
+    defaults: bool,
+    hosts: list[str] | None = None,
+    stray: list[str] | None = None,
+) -> int:
+    """Resolve the remote differences interactively (deploy/capture/diff per file).
+
+    ``hosts`` (when non-empty) restricts the resolution to those hosts;
+    ``stray`` are positional-looking paths swallowed by ``--remotes``'s
+    ``nargs="*"`` and moved back into the selection.
+    """
+    base_dir = resolve_base_dir(base_dir)
+    if base_dir is None:
+        return 1
+    if stray:
+        paths = (paths or []) + stray
+    errors = _validate_remote_hosts(base_dir, hosts or [])
+    if errors:
+        for error in errors:
+            print(f"error: {error}")
+        return 1
+    problems = _remote_problems(base_dir, paths or [], hosts=hosts)
+    if not problems:
+        print("no problems to fix")
+        return 0
+    rc = 0
+    if defaults:
+        for label, host, rel in problems:
+            _allowed, default = _remote_fix_options(label)
+            if default is None:
+                print(
+                    f"skip {remote.format_remote(host, '/' + rel)}: {label} (no default)"
+                )
+                continue
+            if default == "skip":
+                continue
+            actions, infos, errors = _remote_fix_actions(
+                base_dir, label, host, rel, default
+            )
+            if _execute(actions, infos, errors, dry_run, auto_confirm=True) == 1:
+                rc = 1
+        return rc
+    first = True
+    try:
+        for label, host, rel in problems:
+            if not first:
+                print()
+            first = False
+            allowed, default = _remote_fix_options(label)
+            target = remote.format_remote(host, "/" + rel)
+            while True:
+                choice = _ask_fix(label, target, allowed, default)
+                if choice == "diff":
+                    _run_remote_diff(
+                        host, "/" + rel, _remote_tracked(base_dir, host, rel)
+                    )
+                    continue
+                break
+            if choice == "skip":
+                continue
+            actions, infos, errors = _remote_fix_actions(
+                base_dir, label, host, rel, choice
+            )
+            if _execute(actions, infos, errors, dry_run, abort_on_interrupt=True) == 1:
+                rc = 1
+    except _FixAborted:
+        print("aborted (changes already applied are kept)")
+        return 130
+    return rc
+
+
+def _remote_problems(
+    base_dir: str,
+    paths: list[str],
+    hosts: list[str] | None = None,
+) -> list[tuple[str, str, str]]:
+    """Return ``[(label, host, rel), ...]`` for the remote differences.
+
+    ``hosts`` (when non-empty) restricts the scan to those hosts. ``drift``:
+    the remote file exists but differs from its tracked copy. ``missing``: the
+    tracked file is absent on the host.
+    """
+    problems: list[tuple[str, str, str]] = []
+    for host, rel in _remote_sel(base_dir, paths, hosts=hosts):
+        tracked = _remote_tracked(base_dir, host, rel)
+        if not os.path.isfile(tracked) or os.path.islink(tracked):
+            continue
+        remote_path = "/" + rel
+        if not remote.remote_lexists(host, remote_path):
+            problems.append(("missing", host, rel))
+            continue
+        if remote.remote_hash(host, remote_path) != hash_file(tracked):
+            problems.append(("drift", host, rel))
+    return problems
+
+
+def _remote_fix_options(label: str) -> tuple[list[str], str | None]:
+    """Return (allowed actions, default) for a remote problem label."""
+    if label == "drift":
+        return (["deploy", "capture", "diff", "skip"], None)
+    if label == "missing":
+        return (["deploy", "skip"], "deploy")
+    return (["skip"], "skip")
+
+
+def _remote_fix_actions(
+    base_dir: str, label: str, host: str, rel: str, choice: str
+) -> tuple[list[Action], list[str], list[str]]:
+    """Build the actions for one remote ``fix`` choice (deploy/capture)."""
+    actions: list[Action] = []
+    infos: list[str] = []
+    errors: list[str] = []
+    tracked = _remote_tracked(base_dir, host, rel)
+    remote_path = "/" + rel
+    if choice == "deploy":
+        _plan_remote_upload(host, remote_path, tracked, actions, infos)
+    elif choice == "capture":
+        _plan_remote_download(host, remote_path, tracked, actions, infos)
+    return actions, infos, errors

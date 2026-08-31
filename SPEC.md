@@ -65,6 +65,30 @@ Rules:
 - Symlinks in the *source* path are resolved first: the real location is what gets mirrored.
 - `.gitignore` at the repository root is managed by the `ignore` command (see *Ignoring files*).
 
+## Remote hosts (`remotes/`)
+
+myfiles can also version files living on other machines, reached over SSH. Remote hosts are mirrored in a **`remotes/` directory** — a sibling of `files/` at the repository root: each subdirectory of `remotes/` is a **host**, and its contents mirror that host's filesystem exactly like `files/` mirrors the local one (the leading `/` of a remote path is stripped).
+
+```text
+~/Dev/config/dotfiles/
+├── files/                       # the local base-dir
+│   └── ...
+└── remotes/
+    └── ender3/                  # the `ender3` SSH host
+        └── home/admin/
+            └── printer_data/config/
+                ├── printer.cfg
+                └── moonraker.conf
+```
+
+Rules:
+
+- All connection details are delegated to the user's SSH configuration: `ssh <host>` must resolve the host (e.g. `Host ender3` in `~/.ssh/config.d/home`).
+- There are **no symlinks on a remote host**: files are **copied** in one direction or the other — `capture` copies host → repo, `deploy` copies repo → host — and **only when their content differs**.
+- All comparisons are done **by SHA-256 hash** (a file is copied only when the two hashes differ).
+- A remote path is written `{host}:/abs/path` (e.g. `ender3:/home/admin/printer_data/config/printer.cfg`). Every command that accepts file or directory names also accepts this syntax, equivalent to the corresponding tracked path under `remotes/<host>`.
+- The `--remotes` option is **unified** across `capture`, `deploy`, `status`, `fix` and `ls`: it takes **zero or more host names** (`--remotes [<host>...]`). With no value it applies to every host; with one or more, it restricts to those hosts. An unknown host (no `remotes/<host>` directory) is an error.
+
 ## Safety scope for `capture`
 
 For safety, only **directories** are restricted: a directory can be captured only if it is inside one of the following roots:
@@ -128,7 +152,7 @@ Exit codes: `0` success, `1` runtime error, `2` usage error.
 Moves configuration files from the system into `base-dir`, then runs `deploy` to re-create the symlinks.
 
 ```text
-Usage: myfiles capture <path>... [--ignore <glob>...] [--force] [--dry-run]
+Usage: myfiles capture <path>... [--ignore <glob>...] [--force] [--remotes [<host>...]] [--dry-run]
 ```
 
 Behavior:
@@ -149,6 +173,13 @@ Behavior:
   - different content + `--force` but the tracked file has uncommitted git changes → error (commit or restore it first, so no version is lost).
 - Each per-file capture is reported as a single `move-and-link` operation (moved into `base-dir`, then linked back). The planned operations are printed, then confirmation is requested before applying; `--dry-run` prints them without asking or applying.
 
+**Remote capture** — a `{host}:/path` argument (or `--remotes`) captures files from a remote host into `remotes/<host>`:
+
+- `capture {host}:/path` copies the remote file (or, for a directory, every file under it) into `remotes/<host>/…`, **only when the content differs** (compared by SHA-256 hash); identical files are reported as `skip (identical)`. Nothing is moved and no symlink is created — the remote copy stays in place and the repo gains a copy.
+- `--remotes [<host>...]` **recaptures every known remote file** of the given host(s), or of every host when no value is given: each file under `remotes/<host>` whose remote content differs is copied back from the host (same "only if differs" rule). A known file absent on the host is reported as `skip (not on remote)`. An unknown host (no `remotes/<host>` directory) is an error.
+- A positional `{host}:/path` is processed even without `--remotes`; a positional path that would be swallowed by argparse's optional-value syntax after `--remotes` is recognized by its leading `/` (or `host:/` prefix) and treated as a PATH.
+- `--remotes` makes `PATH` optional: `capture --remotes` alone scans every host. The remote plans are printed and confirmed like local captures (`--dry-run` previews them).
+
 Examples:
 
 ```bash
@@ -163,6 +194,15 @@ myfiles capture /etc/fstab ~/.config/app
 
 # preview without touching the disk
 myfiles capture ~/.config/app --dry-run
+
+# capture a file from the ender3 SSH host (copied, only if it differs)
+myfiles capture ender3:/home/admin/printer_data/config/printer.cfg
+
+# recapture every known file of the ender3 host that differs on the host
+myfiles capture --remotes ender3
+
+# recapture every known remote file (all hosts)
+myfiles capture --remotes
 ```
 
 ### `deploy`
@@ -170,12 +210,14 @@ myfiles capture ~/.config/app --dry-run
 Creates the symlinks for the tracked files in `base-dir`.
 
 ```text
-Usage: myfiles deploy <path>... [--force] [--dry-run]
+Usage: myfiles deploy <path>... [--force] [--remotes [<host>...]] [--dry-run]
 ```
 
 Behavior:
 
-- At least one `PATH` is required (there is no implicit "deploy everything"). Each `PATH` is a tracked file or directory (target path or path inside the base directory); a requested path with no tracked file is reported as `skip <target>: not a tracked file`.
+- A `PATH` is required unless `--remotes` is given (there is no implicit "deploy everything"). Each `PATH` is a tracked file or directory (target path or path inside the base directory); a requested path with no tracked file is reported as `skip <target>: not a tracked file`.
+- **Remote deploy** — a `{host}:/path`, a path inside `remotes/`, or a root-relative `remotes/...` path deploys the tracked remote file(s) **to the host** instead: each tracked file under `remotes/<host>` is copied to the host (its parent directories are created remotely), **only when its content differs** (SHA-256). A tracked file missing on the host is uploaded. A directory path deploys every tracked file underneath it.
+- **`--remotes [<host>...]`** (unified option: no value = every host) deploys **every known remote file** of the given host(s) to the host — each tracked file under `remotes/<host>` is copied only when it differs (missing remote parents are created). It makes `PATH` optional (`myfiles deploy --remotes ender3` alone deploys all of ender3). An unknown host is an error. When `--remotes` and `PATH`s are both given, the scan and the explicit paths are both processed.
 - For each tracked file, the parent directories of the target location are created with `mkdir -p` if they don't exist.
 - An **absolute** symlink is created from the target location to the tracked file.
 - The planned symlinks are printed, then confirmation is requested before applying; `--dry-run` prints them without asking or applying.
@@ -304,10 +346,17 @@ myfiles ignore ~/.config/zsh/.antidote ~/.config/htop/htop_history
 Reports the current state without modifying anything.
 
 ```text
-Usage: myfiles status [<path>...]
+Usage: myfiles status [<path>...] [--remotes [<host>...]]
 ```
 
 Without arguments, `status` reports on every tracked file. When one or more `PATH` are given, it reports only on those files — a `PATH` can be a target path (e.g. `~/.config/Thunar/uca.xml`) or a path inside the base directory. A requested file that is not tracked is reported as `not tracked`.
+
+With `--remotes [<host>...]` (unified option: no value = every host), `status` reports the **remote** state instead: the known files under `remotes/` of the given host(s) — or of every host — are compared with their copies on the host. It prints only the differences:
+
+- `drift` — the remote file exists but differs from its tracked copy; the two modification dates are shown (`local:`/`remote:`) and the **most recent side is marked `(newer)`**;
+- `missing` — the tracked file is absent on the host.
+
+Identical remote files are hidden. When at least one difference is found, `status --remotes` ends with a hint inviting to run `myfiles fix --remotes`. Exit code is `1` if any difference is found, `0` otherwise.
 
 `status` prints **only problems**; healthy managed symlinks and valid dir-links are hidden. Each line starts with a short reason word:
 
@@ -330,7 +379,7 @@ Exit code is `1` if any problem is detected (any of the above), `0` otherwise.
 Lists the files tracked by `myfiles` (target locations, with a leading `/`), one per line, honoring the repository's `.gitignore`.
 
 ```text
-Usage: myfiles ls [--base-dir <dir>] [--root-dir <dir>]
+Usage: myfiles ls [--remotes [<host>...]] [--base-dir <dir>] [--root-dir <dir>]
 ```
 
 Behavior:
@@ -339,12 +388,16 @@ Behavior:
 - Files matching the repository's `.gitignore` (e.g. the transient files written inside a dir-link and gitignored with `myfiles ignore`) are **not listed**: `ls` shows only what git actually versions.
 - Prints nothing (and exits `0`) when nothing is listed.
 - It is read-only and never asks; the base-dir is resolved as usual (`--base-dir`, `MYFILES_BASE_DIR`, or discovery from the current directory).
+- With `--remotes [<host>...]` (unified option: no value = every host), the tracked **remote** files are listed instead, as `host:/path` (e.g. `ender3:/home/admin/printer_data/config/printer.cfg`); the repository's `.gitignore` still applies (`remotes/<host>/…` entries are hidden).
 
 Examples:
 
 ```bash
 # list everything versioned by myfiles
 myfiles ls
+
+# list the tracked files of the ender3 remote host
+myfiles ls --remotes ender3
 
 # feed a list back into the tool
 myfiles deploy $(myfiles ls)
@@ -355,7 +408,7 @@ myfiles deploy $(myfiles ls)
 Interactively resolves the problems reported by `status`, one by one. It lists each problem (same labels as `status`) and asks what to do with it.
 
 ```text
-Usage: myfiles fix [<path>...] [--defaults] [--only <errtype>...] [--base-dir <dir>] [--dry-run] [--root-dir <dir>]
+Usage: myfiles fix [<path>...] [--defaults] [--only <errtype>...] [--remotes [<host>...]] [--base-dir <dir>] [--dry-run] [--root-dir <dir>]
 ```
 
 Without arguments, `fix` offers **every** problem reported by `status`. With one or more `PATH`, only the problems of the given file(s)/directory(ies) are processed (a `PATH` can be a target path, a tracked path inside the base directory, or a root-relative path — like `eject`/`deploy`).
@@ -382,6 +435,13 @@ Behavior:
 - Interrupting the session (`Ctrl-C`/EOF) — at either the choice or the confirmation prompt — aborts the whole `fix` (it does not move to the next item), prints `aborted (changes already applied are kept)` and exits with code `130` — items already applied before the interruption are kept.
 - There is deliberately no `fix --all`: every change is chosen, confirmed and applied individually.
 
+**Remote fix (`--remotes [<host>...]`)** — with `--remotes` (unified option: no value = every host), `fix` resolves the remote differences (those reported by `status --remotes`) of the given host(s) instead of the local problems, with the **same REPL**:
+
+- Each differing file is offered as `drift` (remote exists but differs) or `missing` (tracked file absent on the host), labelled with its `{host}:/path`.
+- For `drift`, the actions are `deploy` (copy the tracked file to the host, the tracked copy is the authority), `capture` (copy the host file into the repo, the host content becomes the new tracked copy), `diff` (show the difference, downloading the remote file into a temporary directory) and `skip` — **no default** (an explicit choice is required), exactly like local `drift`.
+- For `missing`, the actions are `deploy` (upload the tracked file to the host, the default) and `skip`.
+- Each chosen change is confirmed and applied immediately, item by item, like local `fix`; `--defaults` applies the default action of every problem (`drift` has no default and is skipped); `Ctrl-C` aborts the whole session (already-applied items are kept).
+
 ### `diff`
 
 Shortcut to compare a system file with its tracked copy, equivalent to `diff -Naur <tracked> <target>` — the tracked copy (in the base directory) is the `before` side, the system file is the `after` side.
@@ -395,6 +455,7 @@ Behavior:
 - `<path>` is either:
   - a **system target path** (e.g. `/etc/UPower/UPower.conf`) — it is compared with `<base-dir>/etc/UPower/UPower.conf`;
   - a **tracked path** inside the base directory (e.g. `<base-dir>/etc/UPower/UPower.conf`) — it is compared with `/etc/UPower/UPower.conf` (under `--root-dir`).
+  - a **remote path** `{host}:/path` (or a tracked path inside `remotes/`) — the tracked remote file is compared with the remote copy, which is **first downloaded into a temporary directory**; the two sides are labelled `<tracked>` and `{host}:/path`.
 - The comparison uses the system `diff` command with `-Naur` (missing files are treated as empty): the tracked copy is the `before` side, the system file the `after` side.
 - Exit code is the `diff` exit code: `0` if identical, `1` if differences, `2` on error.
 

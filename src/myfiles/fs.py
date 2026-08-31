@@ -1,5 +1,6 @@
 """Filesystem helpers."""
 
+import hashlib
 import os
 
 from myfiles.paths import is_within
@@ -18,6 +19,15 @@ def same_content(a: str, b: str) -> bool:
                     return True
     except OSError:
         return False
+
+
+def hash_file(path: str) -> str:
+    """Return the SHA-256 hex digest of the file at ``path``."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def iter_tracked_files(base_dir: str) -> list[str]:

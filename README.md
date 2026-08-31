@@ -26,6 +26,46 @@ The **base-dir** (`files/`) mirrors the system: the leading `/` of a target path
 - **Dir-link**: a whole directory is a symlink (`~/.config/zsh -> .../files/home/cbenz/.config/zsh`); files programs write there land in the repo and are git-ignored via `myfiles ignore`.
 - **Git**: myfiles never creates commits — version `files/` yourself.
 
+## Remote hosts (`remotes/`)
+
+myfiles can also version files on other machines over SSH. Each subdirectory of `remotes/` is a host, mirrored like `files/` (the leading `/` of a remote path is stripped):
+
+```
+remotes/ender3/home/admin/printer_data/config/printer.cfg
+```
+
+- The host is resolved through your SSH configuration (`ssh <host>` must work, e.g. `Host ender3` in `~/.ssh/config.d/home`).
+- No symlinks on a remote: files are **copied** (host → repo for `capture`, repo → host for `deploy`), **only when their content differs** (SHA-256).
+- A remote path is written `{host}:/path` and accepted anywhere a path is.
+- The `--remotes` option is **unified** on `capture`, `deploy`, `status`, `fix` and `ls`: it takes **zero or more host names** (`--remotes [<host>...]`) — no value = every host, one or more = only those hosts.
+
+```bash
+# capture a file from the ender3 host (copied, only if it differs)
+myfiles capture ender3:/home/admin/printer_data/config/printer.cfg
+
+# recapture every known file of ender3 that differs on the host (all hosts if no value)
+myfiles capture --remotes ender3
+
+# deploy tracked files to the host (copied, only if they differ)
+myfiles deploy ender3:/home/admin/printer_data/config/printer.cfg
+
+# deploy every tracked file of ender3 (or of every host when no value)
+myfiles deploy --remotes ender3
+
+# report remote differences (dates + most recent side), or for one host
+myfiles status --remotes
+myfiles status --remotes ender3
+
+# resolve remote differences interactively (deploy / capture / diff / skip)
+myfiles fix --remotes
+
+# list the tracked files of a remote host
+myfiles ls --remotes ender3
+
+# diff the tracked remote file against the live host copy
+myfiles diff ender3:/home/admin/printer_data/config/printer.cfg
+```
+
 ## Installation
 
 Requires Python 3.14+.
@@ -62,7 +102,7 @@ Exit codes: `0` success, `1` runtime error, `2` usage error.
 Moves files from the system into `base-dir`, then (re)creates the symlinks.
 
 ```
-myfiles capture <path>... [--ignore <glob>...] [--force] [--dry-run]
+myfiles capture <path>... [--ignore <glob>...] [--force] [--remotes [<host>...]] [--dry-run]
 ```
 
 - A **file** is moved into `base-dir` and linked.
@@ -86,14 +126,17 @@ myfiles capture ~/.config/app --dry-run
 Creates the symlinks for the tracked files.
 
 ```
-myfiles deploy <path>... [--force] [--dry-run]
+myfiles deploy <path>... [--force] [--remotes [<host>...]] [--dry-run]
 ```
 
-- At least one `PATH` is required (no implicit "deploy everything"). A `PATH` can be a target path, a tracked path, or a root-relative path.
+- A `PATH` is required unless `--remotes` is given (no implicit "deploy everything"). A `PATH` can be a target path, a tracked path, or a root-relative path.
 - A conflict (different file, foreign symlink, directory) is refused without `--force`.
+- `--remotes` (no value = every host) deploys every known tracked file of the given host(s) to the host, copied only if it differs.
 
 ```bash
 myfiles deploy etc/fstab ~/.config/htop
+# deploy every tracked file of ender3 to the host
+myfiles deploy --remotes ender3
 ```
 
 ### eject
@@ -116,10 +159,10 @@ myfiles eject etc/fstab
 Reports problems, without modifying anything.
 
 ```
-myfiles status [<path>...]
+myfiles status [<path>...] [--remotes [<host>...]]
 ```
 
-Prints only problems: `dangling`, `foreign`, `elsewhere`, `directory`, `not-linked`, `drift`, `missing`. Healthy symlinks and valid dir-links are hidden. Exit code `1` if any problem is detected.
+Prints only problems: `dangling`, `foreign`, `elsewhere`, `directory`, `not-linked`, `drift`, `missing`. Healthy symlinks and valid dir-links are hidden. Exit code `1` if any problem is detected. `--remotes` (no value = every host) reports the remote differences instead (drift + dates, missing).
 
 ```bash
 myfiles status
@@ -130,7 +173,7 @@ myfiles status
 Resolves problems interactively, one by one.
 
 ```
-myfiles fix [<path>...] [--defaults] [--only <errtype>...] [--dry-run]
+myfiles fix [<path>...] [--defaults] [--only <errtype>...] [--remotes [<host>...]] [--dry-run]
 ```
 
 - `--only <errtype>` (repeatable): only resolve that problem type (`dangling`, `drift`, …).
@@ -175,13 +218,17 @@ myfiles ignore ~/.config/zsh/.antidote ~/.config/htop/htop_history
 Lists the files versioned by myfiles (target paths with a leading `/`), one per line, honoring `.gitignore`.
 
 ```
-myfiles ls
+myfiles ls [--remotes [<host>...]]
 ```
 
 ```bash
 myfiles ls
 # /etc/fstab
 # /home/cbenz/.bashrc
+
+# list the tracked files of a remote host as host:/path
+myfiles ls --remotes ender3
+# ender3:/home/admin/printer_data/config/printer.cfg
 
 # feed the list back in
 myfiles deploy $(myfiles ls)
