@@ -32,10 +32,7 @@ def place_tracked(base_dir: Path, target: Path) -> Path:
     return dest
 
 
-def test_capture_file_deploy_eject_roundtrip(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
+def test_capture_file_deploy_eject_roundtrip(tmp_path: Path) -> None:
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     source = tmp_path / "etc" / "foo" / "bar.txt"
@@ -57,9 +54,8 @@ def test_capture_file_deploy_eject_roundtrip(
 
 
 def test_capture_directory_ignore_adds_to_gitignore(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     src_dir = tmp_path / "etc" / "app"
@@ -100,11 +96,8 @@ def test_capture_directory_ignore_adds_to_gitignore(
     assert f"files/{rel}/sub/cache" in gitignore
 
 
-def test_capture_ignore_anchored_pattern(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
+def test_capture_ignore_anchored_pattern(tmp_path: Path) -> None:
     # `/cache` (gitignore anchor) ignores only the top-level cache directory.
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     src_dir = tmp_path / "etc" / "app"
@@ -124,9 +117,8 @@ def test_capture_ignore_anchored_pattern(
 
 
 def test_capture_directory_ignore_writes_gitignore_via_cli(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     src_dir = tmp_path / "etc" / "app"
@@ -170,9 +162,8 @@ def test_capture_directory_ignore_writes_gitignore_via_cli(
 
 
 def test_capture_directory_ignore_vendored_git(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     src_dir = tmp_path / "etc" / "app"
@@ -374,10 +365,7 @@ def test_dry_run_deploy_makes_no_changes(tmp_path: Path) -> None:
     assert not os.path.lexists(target)
 
 
-def test_dry_run_capture_makes_no_changes(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
+def test_dry_run_capture_makes_no_changes(tmp_path: Path) -> None:
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     source = tmp_path / "keep.txt"
@@ -389,9 +377,8 @@ def test_dry_run_capture_makes_no_changes(
 
 
 def test_dry_run_notice_is_first_line(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     source = tmp_path / "keep.txt"
@@ -563,10 +550,7 @@ def test_deploy_with_alternative_root(tmp_path: Path) -> None:
     assert not os.path.lexists(tmp_path / "etc" / "fstab")
 
 
-def test_capture_with_alternative_root(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
+def test_capture_with_alternative_root(tmp_path: Path) -> None:
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     sandbox = tmp_path / "sandbox"
@@ -843,10 +827,7 @@ def test_capture_forbids_inside_base_dir(tmp_path: Path) -> None:
     assert source.read_text() == "content"
 
 
-def test_capture_force_overwrites_tracked_file(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
+def test_capture_force_overwrites_tracked_file(tmp_path: Path) -> None:
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     tracked = base_dir / "files" / "etc" / "app.conf"
@@ -868,10 +849,7 @@ def test_capture_force_overwrites_tracked_file(
     assert not (base_dir / "files" / "etc" / "app.conf.bak").exists()
 
 
-def test_capture_force_refuses_dirty_tracked_file(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
+def test_capture_force_refuses_dirty_tracked_file(tmp_path: Path) -> None:
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     subprocess.run(["git", "-C", str(base_dir), "init", "-q"], check=False)
@@ -904,9 +882,8 @@ def test_capture_force_refuses_dirty_tracked_file(
 
 
 def test_capture_does_not_commit_to_git_repo(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     subprocess.run(["git", "-C", str(base_dir), "init", "-q"], check=False)
@@ -946,7 +923,6 @@ def test_capture_cancelled_does_not_commit(
     tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(commands, "_ask_confirmation", _confirm_no)
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     subprocess.run(["git", "-C", str(base_dir), "init", "-q"], check=False)
@@ -978,10 +954,7 @@ def test_capture_cancelled_does_not_commit(
     assert not os.path.islink(source_path)
 
 
-def test_capture_managed_symlink_is_skipped(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
+def test_capture_managed_symlink_is_skipped(tmp_path: Path) -> None:
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     source = tmp_path / "etc" / "app.conf"
@@ -995,9 +968,8 @@ def test_capture_managed_symlink_is_skipped(
 
 
 def test_capture_reports_already_captured_symlink(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     source = tmp_path / "etc" / "app.conf"
@@ -1068,8 +1040,8 @@ def test_eject_tracked_absolute_path_maps_to_target(tmp_path: Path) -> None:
 
 
 def test_capture_directory_in_sandbox_root(tmp_path: Path) -> None:
-    # ALLOWED_DIR_ROOTS is NOT patched: --root-dir maps /etc under the sandbox,
-    # so the directory capture is allowed.
+    # A directory capture under --root-dir is mirrored relative to the sandbox
+    # root; there is no allowed-roots restriction anymore.
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     sandbox = tmp_path / "sandbox"
@@ -1094,9 +1066,8 @@ def test_capture_directory_in_sandbox_root(tmp_path: Path) -> None:
 
 
 def test_capture_identical_tracked_shows_only_link(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     root = tmp_path / "root"
@@ -1120,9 +1091,8 @@ def test_capture_identical_tracked_shows_only_link(
 
 
 def test_capture_dir_link_idempotent_skip(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     root = tmp_path / "root"
@@ -1147,9 +1117,8 @@ def test_capture_dir_link_idempotent_skip(
 
 
 def test_capture_directory_converts_fully_managed_to_dir_link(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     root = tmp_path / "root"
@@ -1181,9 +1150,8 @@ def test_capture_directory_converts_fully_managed_to_dir_link(
 
 
 def test_capture_directory_refuses_drift(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     root = tmp_path / "root"
@@ -1210,9 +1178,8 @@ def test_capture_directory_refuses_drift(
 
 
 def test_capture_directory_accepts_identical_real_file(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     root = tmp_path / "root"
@@ -1245,12 +1212,11 @@ def test_capture_directory_accepts_identical_real_file(
 
 
 def test_capture_fully_managed_dir_with_ignore_converts_to_dir_link(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # The `~/.config/zsh` case: files already captured individually, plus
     # transient real files passed with `--ignore`. The directory is collapsed
     # into a dir-link and the ignored entries are gitignored.
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     root = tmp_path / "root"
@@ -1292,10 +1258,7 @@ def test_capture_fully_managed_dir_with_ignore_converts_to_dir_link(
     assert "files/home/cbenz/.config/zsh/.zcompdump" in gitignore
 
 
-def test_capture_ignore_does_not_clobber_managed_symlink(
-    tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
+def test_capture_ignore_does_not_clobber_managed_symlink(tmp_path: Path) -> None:
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     root = tmp_path / "root"
@@ -1324,9 +1287,8 @@ def test_capture_ignore_does_not_clobber_managed_symlink(
 
 
 def test_capture_directory_force_adopts_system(
-    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     root = tmp_path / "root"
@@ -1545,18 +1507,25 @@ def test_status_no_tracked_files(
     assert "no tracked files" in out
 
 
-def test_capture_directory_outside_allowed_roots_rejected(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_capture_directory_outside_former_roots_now_allowed(
+    tmp_path: Path,
 ) -> None:
+    # The "allowed roots" restriction was removed (2026-09): a directory
+    # anywhere — not only under /etc, /usr, ~/.config or ~/.local/share — can
+    # be captured, e.g. `~/.ssh/config.d`.
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
-    src_dir = tmp_path / "somewhere" / "app"  # not under /etc, /usr, ~/.config, ...
+    src_dir = tmp_path / "home" / "cbenz" / ".ssh" / "config.d"
     src_dir.mkdir(parents=True)
-    (src_dir / "x").write_text("x")
+    (src_dir / "home.conf").write_text("host home\n")
 
-    assert commands.capture(str(base_dir), [str(src_dir)], [], False, False) == 1
-    out = capsys.readouterr().out
-    assert "outside the allowed roots" in out
+    assert commands.capture(str(base_dir), [str(src_dir)], [], False, False) == 0
+    # The whole directory was moved into base-dir and linked back (dir-link).
+    tracked_dir = place_tracked(base_dir, src_dir)
+    assert os.path.islink(src_dir)
+    assert os.path.realpath(src_dir) == os.path.realpath(tracked_dir)
+    assert (tracked_dir / "home.conf").read_text() == "host home\n"
+    assert (src_dir / "home.conf").read_text() == "host home\n"
 
 
 def test_capture_missing_path_errors(
@@ -1625,10 +1594,9 @@ def test_ls_skips_git_directory(
     assert capsys.readouterr().out.splitlines() == ["/etc/fstab"]
 
 
-def test_cli_dispatch_capture(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+def test_cli_dispatch_capture(tmp_path: Path) -> None:
     from myfiles.cli import main
 
-    monkeypatch.setattr(commands, "ALLOWED_DIR_ROOTS", (str(tmp_path),))
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     source = tmp_path / "keep.txt"

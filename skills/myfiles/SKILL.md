@@ -50,7 +50,7 @@ Moves files from the system into `files/`, then (re)creates the symlinks.
 
 - A **file** is moved (`move-and-link`); a **directory** is captured as a **dir-link** (already fully managed → `convert to dir-link`, otherwise `move-and-link … (dir-link)`).
 - A directory **already captured** (managed symlink) → `skip (already captured)` (idempotence).
-- **Safety restriction**: a *directory* may only be captured under `/etc`, `/usr`, the XDG config home (`~/.config`) or the XDG data home (`~/.local/share`). Individual files are always allowed. Capturing a source that is **inside the base-dir** is forbidden.
+- **Safety**: any **directory** can be captured (no "allowed roots" restriction): only `/` itself and a source **inside the base-dir** are rejected.
 - `--ignore <glob>` (repeatable, gitignore syntax, relative to the captured path): excludes entries from the drift check **and appends them to the repository's `.gitignore`** (resolved to their tracked location, e.g. `files/home/<user>/.config/zsh/.antidote`) — for transient files (histories, caches) that a program writes inside a dir-link. Entries present on disk are moved into `files/` so they keep working through the dir-link.
 - **Drift** (a real file whose content differs from the tracked copy, a foreign/misplaced symlink…) → **refused** unless `--force` (the system content becomes the new tracked copy). With `--force`, refused if the tracked file has uncommitted git changes (no version is lost).
 
@@ -135,11 +135,11 @@ myfiles diff host:/home/user/.config/app/config.yaml
 ## Pitfalls & anti-patterns
 
 - `-d/--base-dir` is a **per-subcommand** option: `myfiles status -d ~/Dev/config/dotfiles` (not `myfiles -d … status`).
-- **Never test on the real system**: to try or reproduce, isolate with `--base-dir <temp-repo>` + `--root-dir <temp-root>` (allowed capture roots are mapped under `--root-dir`). Otherwise a command applies to the real `files/` and the real links.
+- **Never test on the real system**: to try or reproduce, isolate with `--base-dir <temp-repo>` + `--root-dir <temp-root>`. Otherwise a command applies to the real `files/` and the real links.
 - **Removed flags/commands** not to use: `recapture` (replaced by `capture --remotes`), `fix --all`, any config file, `--exclude`.
 - `--remotes` takes an optional value, so argparse can swallow a path placed right after it: a token starting with `/` or `host:/` is still recognized as a PATH, but when in doubt give `--remotes` before the paths (or avoid mixing them).
 - `drift` **never has a default** in `fix`: do not "confirm" without an explicit choice.
-- Do not capture a directory outside `/etc`, `/usr`, `~/.config`, `~/.local/share`, nor a source inside the base-dir.
+- Do not capture `/` itself nor a source inside the base-dir.
 - Never forget: `myfiles` commits nothing — after a `capture`/`ignore`, offer (or make) the `git add`/`commit` of the dotfiles repository.
 
 ## Typical workflows

@@ -61,6 +61,7 @@ The base-dir usually lives in a `files/` subdirectory of the dotfiles repository
 Rules:
 
 - Capturing the filesystem root `/` itself is rejected.
+- Capturing a source that is inside the base directory is **forbidden** (it would move the repository into itself).
 - A file directly at the root (e.g. `/fstab`) maps to `base-dir/fstab`.
 - Symlinks in the *source* path are resolved first: the real location is what gets mirrored.
 - `.gitignore` at the repository root is managed by the `ignore` command (see *Ignoring files*).
@@ -88,19 +89,6 @@ Rules:
 - All comparisons are done **by SHA-256 hash** (a file is copied only when the two hashes differ).
 - A remote path is written `{host}:/abs/path` (e.g. `ender3:/home/admin/printer_data/config/printer.cfg`). Every command that accepts file or directory names also accepts this syntax, equivalent to the corresponding tracked path under `remotes/<host>`.
 - The `--remotes` option is **unified** across `capture`, `deploy`, `status`, `fix` and `ls`: it takes **zero or more host names** (`--remotes [<host>...]`). With no value it applies to every host; with one or more, it restricts to those hosts. An unknown host (no `remotes/<host>` directory) is an error.
-
-## Safety scope for `capture`
-
-For safety, only **directories** are restricted: a directory can be captured only if it is inside one of the following roots:
-
-- `/etc`
-- `/usr`
-- the XDG config home (default `~/.config`)
-- the XDG data home (default `~/.local/share`)
-
-Directories outside these roots are rejected. **Individual files** are always allowed, wherever they are (e.g. `~/.bashrc`). The XDG paths are resolved with `xdg-base-dirs`, so `XDG_CONFIG_HOME`/`XDG_DATA_HOME` are honored when set.
-
-Capturing a source that is inside the base directory is **forbidden** (it would move the repository into itself).
 
 ## Ignoring files
 
@@ -136,7 +124,7 @@ myfiles ignore ~/.config/zsh/.antidote ~/.config/htop/htop_history
 | Option | Meaning |
 | --- | --- |
 | `-d`, `--base-dir <dir>` | Dotfiles repository root (e.g. `~/Dev/config/dotfiles`). The effective base-dir holding the tracked files is its `files/` subdirectory. If omitted, the `MYFILES_BASE_DIR` environment variable is used; if that is not set either, the repository root is discovered by walking up from the current directory looking for the `files/` base directory. |
-| `--root-dir <dir>` | Filesystem root under which target locations are resolved (default: `/`). Useful to run the tool in a sandbox. The allowed `capture` roots are also mapped under this root (e.g. `/etc` is accepted as `<root>/etc`), so directory captures work in a sandbox. |
+| `--root-dir <dir>` | Filesystem root under which target locations are resolved (default: `/`). Useful to run the tool in a sandbox. |
 | `--dry-run` | Preview-only: print what would be done, without asking for confirmation and without applying anything. When active, the first line printed by any command is a `dry-run` notice. |
 
 Base directory resolution order: `--base-dir`, then the `MYFILES_BASE_DIR` environment variable, then a `files/` base directory found in the current directory or one of its ancestors. If none is available, the command fails with an error inviting you to run it from the dotfiles repository, to pass `--base-dir`, or to set `MYFILES_BASE_DIR`.
@@ -157,8 +145,7 @@ Usage: myfiles capture <path>... [--ignore <glob>...] [--force] [--remotes [<hos
 
 Behavior:
 
-- `<path>` is a file or a directory; a directory is captured as a **dir-link** (the whole directory mirrors the repo in `base-dir`).
-- If `<path>` is a directory, it must be inside one of the allowed roots (see *Safety scope for `capture`*); a plain file is always accepted.
+- `<path>` is a file or a directory; a directory is captured as a **dir-link** (the whole directory mirrors the repo in `base-dir`). Any directory can be captured (no "allowed roots" restriction); only the filesystem root `/` and a source inside the base directory are rejected.
 - `--ignore` is repeatable; each value is a **gitignore-style glob** matched against the path relative to `<path>` (so `cache` matches the directory at any depth, `*.log` any `.log` basename, `cache/**` everything under `cache`, a leading `/` anchors to `<path>`, a trailing `/` restricts to directories), reported as `skip (ignored)`. It only affects **directory** captures (a plain file capture is unaffected): the matched entries never count as drift, and they are **appended to the repository's `.gitignore`** (resolved to their tracked location, e.g. `~/.config/zsh/.zsh_history` -> `files/home/user/.config/zsh/.zsh_history`), so git never versions them — exactly like running `myfiles ignore` on them.
 - Idempotence: if the source is **already a managed symlink** (a file symlink or a dir-link), it is skipped (not re-captured) and reported as `skip (already captured)`.
 - **Directory capture (dir-link)** — `capture <dir>` makes the whole directory a single managed symlink `<dir> -> base-dir/<rel>`:
@@ -498,7 +485,7 @@ myfiles diff /path/to/base-dir/etc/UPower/UPower.conf
 | `--dry-run` on any command | no filesystem change |
 | `myfiles ignore ~/.config/zsh/.antidote` | appends `files/home/user/.config/zsh/.antidote` to `.gitignore` (created with a managed-by-myfiles header) |
 | `myfiles ignore <path>` when the entry is already there | prints `nothing to ignore`, no change |
-| `capture --root-dir /tmp/sandbox` of a directory under the sandbox | allowed: `/etc`-like roots are mapped under the sandbox |
+| `capture --root-dir /tmp/sandbox` of a directory under the sandbox | allowed; the directory is mirrored relative to the sandbox root |
 | `myfiles deploy` without any `PATH` | argparse error (paths are required), exit code `2` |
 | `myfiles fix` when the status is clean | prints `no problems to fix`, exit code `0` |
 | `myfiles fix` on a `dangling`/`foreign` symlink | default `deploy` replaces it with the managed link |

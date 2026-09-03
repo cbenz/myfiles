@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Any, cast
 
 import pathspec
-import xdg_base_dirs
 
 from myfiles import remote
 from myfiles.fs import hash_file, iter_tracked_files, prune_empty_dirs, same_content
@@ -23,14 +22,6 @@ from myfiles.paths import (
     relative_to_target,
     repo_base_dir,
     target_to_relative,
-)
-
-#: Directory roots allowed by `capture` (see SPEC, "Safety scope for capture").
-ALLOWED_DIR_ROOTS: tuple[str, ...] = (
-    "/etc",
-    "/usr",
-    str(xdg_base_dirs.xdg_config_home()),
-    str(xdg_base_dirs.xdg_data_home()),
 )
 
 
@@ -1135,10 +1126,6 @@ def _plan_capture(
         return
 
     if os.path.isdir(raw):
-        if not _allowed_dir(raw, root):
-            roots = ", ".join(_allowed_roots(root))
-            errors.append(f"directory {arg} is outside the allowed roots ({roots})")
-            return
         # A directory is always captured as a dir-link; the `--ignore` entries
         # are appended to the repository's `.gitignore` (see _plan_capture_dir).
         _plan_capture_dir(
@@ -1389,27 +1376,6 @@ def _excluded(rel: str, patterns: list[str], is_dir: bool) -> bool:
         return False
     path = rel + "/" if is_dir else rel
     return _ignored_spec(patterns).match_file(path)
-
-
-def _allowed_roots(root: str) -> list[str]:
-    """Return the allowed capture roots, mapped under ``root`` when sandboxed.
-
-    With ``--root-dir``, each real root (e.g. ``/etc``) is also accepted at its
-    root-relative location (e.g. ``<root>/etc``), so directory captures work in
-    a sandbox while the real paths stay valid.
-    """
-    if root == "/":
-        return list(ALLOWED_DIR_ROOTS)
-    roots = list(ALLOWED_DIR_ROOTS)
-    for allowed in ALLOWED_DIR_ROOTS:
-        mapped = os.path.join(root, allowed.lstrip("/"))
-        if mapped not in roots:
-            roots.append(mapped)
-    return roots
-
-
-def _allowed_dir(path: str, root: str = "/") -> bool:
-    return any(is_within(allowed, path) for allowed in _allowed_roots(root))
 
 
 # --------------------------------------------------------------------------- #
