@@ -191,7 +191,7 @@ myfiles fix --defaults
 
 ### diff
 
-Compares a system file with its tracked copy (like `diff -Naur`).
+Compares a system file with its tracked copy (like `diff -Naur`), the two sides ordered by modification date so the older file is `-` and the **newer** one is `+`.
 
 ```
 myfiles diff <path>

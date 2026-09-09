@@ -380,6 +380,52 @@ def test_diff_remote_missing_reports_error(
     assert "does not exist" in capsys.readouterr().out
 
 
+def test_diff_remote_orders_newer_file_as_after(
+    tmp_path: Path, fake_hosts: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """The older file is the ``-`` (before) side, the newer one the ``+`` (after)."""
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    tracked = place_remote(base_dir, "ender3", "etc/motd", "tracked\n")
+    target = host_file(fake_hosts, "ender3", "etc/motd", "remote\n")
+
+    # The remote file is the newer one -> it must be the ``+++`` (after) side.
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    os.utime(target, (1_700_000_000, 1_700_000_000))
+    assert commands.diff(str(base_dir), "ender3:/etc/motd") == 1
+    lines = capfd.readouterr().out.splitlines()
+    before = next(line[4:] for line in lines if line.startswith("--- "))
+    after = next(line[4:] for line in lines if line.startswith("+++ "))
+    assert str(tracked) in before and "ender3:/etc/motd" in after
+
+    # The tracked copy is the newer one -> it is the ``+++`` (after) side.
+    os.utime(tracked, (1_700_000_000, 1_700_000_000))
+    os.utime(target, (1_600_000_000, 1_600_000_000))
+    assert commands.diff(str(base_dir), "ender3:/etc/motd") == 1
+    lines = capfd.readouterr().out.splitlines()
+    before = next(line[4:] for line in lines if line.startswith("--- "))
+    after = next(line[4:] for line in lines if line.startswith("+++ "))
+    assert "ender3:/etc/motd" in before and str(tracked) in after
+
+
+def test_diff_remote_equal_dates_keeps_tracked_before(
+    tmp_path: Path, fake_hosts: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """When the dates are equal the tracked copy stays the ``before`` side."""
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    tracked = place_remote(base_dir, "ender3", "etc/motd", "tracked\n")
+    target = host_file(fake_hosts, "ender3", "etc/motd", "remote\n")
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    os.utime(target, (1_600_000_000, 1_600_000_000))
+
+    assert commands.diff(str(base_dir), "ender3:/etc/motd") == 1
+    lines = capfd.readouterr().out.splitlines()
+    before = next(line[4:] for line in lines if line.startswith("--- "))
+    after = next(line[4:] for line in lines if line.startswith("+++ "))
+    assert "ender3:/etc/motd" in after and str(tracked) in before
+
+
 # --------------------------------------------------------------------------- #
 # status --remotes
 # --------------------------------------------------------------------------- #

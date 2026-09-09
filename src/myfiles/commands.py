@@ -1026,9 +1026,11 @@ def _dedupe_actions(actions: list[Action]) -> list[Action]:
 def diff(base_dir: str | None, path: str, root: str = "/") -> int:
     """Compare a system file with its tracked copy (like ``diff -Naur``).
 
-    The tracked copy is the ``before`` side and the system file the ``after``
-    side. A ``host:/path`` (or a tracked path under ``remotes/``) compares a
-    tracked remote file with its remote copy, which is first downloaded into a
+    The two sides are ordered by modification date: the older file is the
+    ``before`` (``-``) side and the newer one the ``after`` (``+``) side (the
+    tracked copy stays ``before`` when the dates are equal or unknown). A
+    ``host:/path`` (or a tracked path under ``remotes/``) compares a tracked
+    remote file with its remote copy, which is first downloaded into a
     temporary directory.
     """
     base_dir = resolve_base_dir(base_dir)
@@ -1059,8 +1061,31 @@ def diff(base_dir: str | None, path: str, root: str = "/") -> int:
     return _run_diff(tracked, target)
 
 
+def _order_by_mtime(
+    a: str, b: str, label_a: str, label_b: str
+) -> tuple[str, str, str, str]:
+    """Return ``(before, after, label_before, label_after)`` ordered by mtime.
+
+    The older file (smallest mtime) becomes the ``-``/``before`` side and the
+    newer file the ``+``/``after`` side. When the dates are equal or cannot be
+    read (a file is missing...), the original order (``a`` before ``b``) is
+    kept.
+    """
+    try:
+        a_mtime = os.path.getmtime(a)
+        b_mtime = os.path.getmtime(b)
+    except OSError:
+        return a, b, label_a, label_b
+    if a_mtime > b_mtime:
+        return b, a, label_b, label_a
+    return a, b, label_a, label_b
+
+
 def _run_diff(tracked: str, target: str) -> int:
-    return _run_diff_with_labels(tracked, target, tracked, target)
+    before, after, label_before, label_after = _order_by_mtime(
+        tracked, target, tracked, target
+    )
+    return _run_diff_with_labels(before, after, label_before, label_after)
 
 
 def _run_diff_with_labels(
@@ -1972,7 +1997,14 @@ def _deploy_remote(base_dir: str, sel: list[tuple[str, str]], dry_run: bool) -> 
 
 
 def _run_remote_diff(host: str, remote_path: str, tracked: str) -> int:
-    """Diff a tracked remote file against its remote copy (downloaded to a temp dir)."""
+    """Diff a tracked remote file against its remote copy (downloaded to a temp dir).
+
+    The two sides are ordered by modification date: the older file is the
+    ``-``/``before`` side, the newer one the ``+``/``after`` side (the remote
+    file's real mtime is compared, not the temporary download's). When the
+    dates are equal or the remote mtime cannot be read, the tracked copy stays
+    the ``before`` side.
+    """
     if not remote.remote_lexists(host, remote_path):
         print(f"error: {remote.format_remote(host, remote_path)} does not exist")
         return 1
@@ -1983,12 +2015,20 @@ def _run_remote_diff(host: str, remote_path: str, tracked: str) -> int:
         except remote.RemoteError as exc:
             print(f"error: {exc}")
             return 1
-        return _run_diff_with_labels(
-            tracked,
-            downloaded,
-            display_path(tracked),
-            remote.format_remote(host, remote_path),
-        )
+        tracked_label = display_path(tracked)
+        remote_label = remote.format_remote(host, remote_path)
+        remote_mtime = remote.remote_mtime(host, remote_path)
+        tracked_mtime = os.path.getmtime(tracked) if os.path.isfile(tracked) else None
+        if (
+            tracked_mtime is not None
+            and remote_mtime is not None
+            and tracked_mtime > remote_mtime
+        ):
+            # The tracked copy is newer -> it becomes the ``+``/``after`` side.
+            return _run_diff_with_labels(
+                downloaded, tracked, remote_label, tracked_label
+            )
+        return _run_diff_with_labels(tracked, downloaded, tracked_label, remote_label)
 
 
 def _status_remote(

@@ -610,9 +610,25 @@ def test_diff_by_tracked_path(tmp_path: Path) -> None:
     assert commands.diff(str(base_dir), str(tracked), root=str(root)) == 1
 
 
-def test_diff_order_tracked_is_before_target(
+def _diff_sides(
+    base_dir: Path,
+    root: Path,
+    tracked: Path,
+    target: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> tuple[str, str]:
+    """Run a local diff and return which paths are the ``---``/``+++`` sides."""
+    assert commands.diff(str(base_dir), str(target), root=str(root)) == 1
+    lines = capfd.readouterr().out.splitlines()
+    before = next(line[4:] for line in lines if line.startswith("--- "))
+    after = next(line[4:] for line in lines if line.startswith("+++ "))
+    return before, after
+
+
+def test_diff_orders_newer_file_as_after(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
+    """The older file is the ``-`` (before) side, the newer one the ``+`` (after)."""
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
     root = tmp_path / "root"
@@ -623,10 +639,54 @@ def test_diff_order_tracked_is_before_target(
     tracked.parent.mkdir(parents=True)
     tracked.write_text("repo\n")
 
+    # The tracked copy is the newer file -> it must be the ``+++`` (after) side.
+    os.utime(target, (1_600_000_000, 1_600_000_000))
+    os.utime(tracked, (1_700_000_000, 1_700_000_000))
+    before, after = _diff_sides(base_dir, root, tracked, target, capfd)
+    assert str(target) in before and str(tracked) in after
+
+    # The system file is the newer one -> it is the ``+++`` (after) side.
+    os.utime(target, (1_700_000_000, 1_700_000_000))
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    before, after = _diff_sides(base_dir, root, tracked, target, capfd)
+    assert str(tracked) in before and str(target) in after
+
+
+def test_diff_equal_dates_keeps_tracked_before(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """When the dates are equal the tracked copy stays the ``before`` side."""
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    root = tmp_path / "root"
+    target = root / "etc" / "app.conf"
+    target.parent.mkdir(parents=True)
+    target.write_text("system\n")
+    tracked = base_dir / "files" / "etc" / "app.conf"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("repo\n")
+
+    os.utime(target, (1_600_000_000, 1_600_000_000))
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    before, after = _diff_sides(base_dir, root, tracked, target, capfd)
+    assert str(tracked) in before and str(target) in after
+
+
+def test_diff_missing_target_keeps_tracked_before(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A missing target cannot be dated: the tracked copy stays the ``before`` side."""
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    root = tmp_path / "root"
+    target = root / "etc" / "app.conf"
+    tracked = base_dir / "files" / "etc" / "app.conf"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("content\n")
+
     assert commands.diff(str(base_dir), str(target), root=str(root)) == 1
-    out = capfd.readouterr().out
-    lines = out.splitlines()
-    assert lines[0].startswith("--- ") and str(tracked) in lines[0]
+    lines = capfd.readouterr().out.splitlines()
+    assert any(line.startswith("--- ") and str(tracked) in line for line in lines)
     assert any(line.startswith("+++ ") and str(target) in line for line in lines)
 
 

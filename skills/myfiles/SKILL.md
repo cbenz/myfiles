@@ -27,9 +27,9 @@ Key principles:
 
 `files/` (the base-dir) **mirrors the filesystem root**: the leading `/` of a target path is stripped.
 
-| Target | Tracked in `files/` |
-| --- | --- |
-| `/etc/fstab` | `files/etc/fstab` |
+| Target                      | Tracked in `files/`                         |
+| --------------------------- | ------------------------------------------- |
+| `/etc/fstab`                | `files/etc/fstab`                           |
 | `~/.config/app/config.yaml` | `files/home/<user>/.config/app/config.yaml` |
 
 Deployed links look like `~/.config/app/config.yaml -> <repo>/files/home/<user>/.config/app/config.yaml`, or a **dir-link** `~/.config/zsh -> <repo>/files/home/<user>/.config/zsh`.
@@ -84,11 +84,11 @@ Read-only. Prints **only problems** (lines `label <target>`), nothing when healt
 
 Resolves the problems reported by `status` **one by one**, interactively (a REPL) — there is deliberately **no `fix --all`**.
 
-| Problem | Actions | Default |
-| --- | --- | --- |
-| `dangling`/`foreign`/`elsewhere`/`not-linked`/`missing`, dangling/foreign dir-link | `deploy`, `skip` | `deploy` |
-| `drift` | `deploy` (tracked wins, system kept as `.bak`) · `capture` (system wins) · `diff` (inspect) · `skip` | **none** (an explicit choice is required; Enter re-asks) |
-| `directory` | `skip` | `skip` (not auto-fixable, reported only) |
+| Problem                                                                            | Actions                                                                                              | Default                                                  |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `dangling`/`foreign`/`elsewhere`/`not-linked`/`missing`, dangling/foreign dir-link | `deploy`, `skip`                                                                                     | `deploy`                                                 |
+| `drift`                                                                            | `deploy` (tracked wins, system kept as `.bak`) · `capture` (system wins) · `diff` (inspect) · `skip` | **none** (an explicit choice is required; Enter re-asks) |
+| `directory`                                                                        | `skip`                                                                                               | `skip` (not auto-fixable, reported only)                 |
 
 Keys: `d`=deploy · `c`=capture · `i`=diff (inspect, then re-asks) · `s`=skip. Each choice is confirmed and applied immediately (`[Y/n]`). `--defaults` runs non-interactively (drifts without a default are skipped); `--only drift` restricts to one problem type; `Ctrl-C` aborts the whole session (exit `130`, already-applied changes are kept).
 
@@ -99,7 +99,7 @@ myfiles fix --only drift --defaults
 
 ### `diff <path>`
 
-Equivalent to `diff -Naur <tracked> <target>` (tracked is `before`, the system file `after`) — handy to inspect a drift before deciding.
+Like `diff -Naur`, but the two sides are **ordered by modification date**: the older file is `-` (before), the newer one `+` (after) — handy to inspect a drift before deciding (the most recently modified side is always the `+` one).
 
 ### `ignore <path>... [--dry-run]`
 

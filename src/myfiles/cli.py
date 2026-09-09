@@ -191,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     diff_parser = sub.add_parser(
         "diff",
-        help="Show differences between a system file and its tracked copy (like `diff -Naur`).",
+        help="Show differences between a system file and its tracked copy (`diff -Naur`), the newer file shown as `+`.",
     )
     add_base_dir(diff_parser)
     add_root_dir(diff_parser)

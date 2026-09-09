@@ -415,7 +415,7 @@ Behavior:
 
 - For `dangling`/`foreign`/`elsewhere`/`not-linked`/`missing`, `deploy` re-links the tracked file (replacing the conflicting symlink or file, like `deploy --force`).
 - For a dangling/foreign directory symlink problem, one `deploy` replaces the directory symlink with a real directory and links every tracked file underneath it. A valid dir-link is not a problem and is never offered.
-- For `drift`, `deploy` replaces the system file with the tracked one (the tracked copy is the authority, the drifted system file is kept as `target.bak`); `capture` moves the system file into `base-dir` (becoming the new tracked copy) and links it back; `diff` runs `diff -Naur <tracked> <target>` and re-asks; `skip` leaves it alone.
+- For `drift`, `deploy` replaces the system file with the tracked one (the tracked copy is the authority, the drifted system file is kept as `target.bak`); `capture` moves the system file into `base-dir` (becoming the new tracked copy) and links it back; `diff` shows the difference between the two files (the sides are ordered by modification date — the older file is `-`, the newer `+`) and re-asks; `skip` leaves it alone.
 - A problem is kept only if it concerns one of the requested `PATH`s: a file is matched by its exact tracked path, a directory by everything underneath it (so fixing a directory-symlink problem deploys all its files). If no problem matches the selection, `fix` prints `no problems to fix`.
 - The answers are `d`/`deploy`, `c`/`capture`, `i`/`diff` (inspect), `s`/`skip`; empty input picks the default when there is one. `drift` has **no default**: an empty or invalid answer re-asks.
 - Each chosen change is **confirmed and applied immediately**, item by item (the items are independent): its plan is printed, then `[Y/n]` is asked exactly like running `deploy`/`capture` by hand, and the change is applied on `Y` (`N change(s) applied`) or left untouched on `n`. With `--dry-run` the plan is only previewed (no confirmation). There is no batch plan/confirmation at the end.
@@ -431,7 +431,7 @@ Behavior:
 
 ### `diff`
 
-Shortcut to compare a system file with its tracked copy, equivalent to `diff -Naur <tracked> <target>` — the tracked copy (in the base directory) is the `before` side, the system file is the `after` side.
+Shortcut to compare a system file with its tracked copy (like `diff -Naur`) — the two files are **ordered by their modification date**: the older one is the `before` side (`-`), the newer one the `after` side (`+`), so the diff always reads as the evolution *towards* the most recently modified file.
 
 ```text
 Usage: myfiles diff <path> [--base-dir <dir>] [--root-dir <dir>]
@@ -443,7 +443,7 @@ Behavior:
   - a **system target path** (e.g. `/etc/UPower/UPower.conf`) — it is compared with `<base-dir>/etc/UPower/UPower.conf`;
   - a **tracked path** inside the base directory (e.g. `<base-dir>/etc/UPower/UPower.conf`) — it is compared with `/etc/UPower/UPower.conf` (under `--root-dir`).
   - a **remote path** `{host}:/path` (or a tracked path inside `remotes/`) — the tracked remote file is compared with the remote copy, which is **first downloaded into a temporary directory**; the two sides are labelled `<tracked>` and `{host}:/path`.
-- The comparison uses the system `diff` command with `-Naur` (missing files are treated as empty): the tracked copy is the `before` side, the system file the `after` side.
+- The comparison uses the system `diff` command with `-Naur` (missing files are treated as empty). The two sides are **ordered by their modification dates** (`mtime`): the older file is the `before` side (`-`), the newer one the `after` side (`+`). When the dates are equal or unavailable (missing file, unreadable stat), the tracked copy stays the `before` side. For a remote file, the comparison uses the remote file's **real** `mtime` (not the one of the temporary download).
 - Exit code is the `diff` exit code: `0` if identical, `1` if differences, `2` on error.
 
 Examples:
@@ -476,7 +476,7 @@ myfiles diff /path/to/base-dir/etc/UPower/UPower.conf
 | `myfiles status` run from inside the repository | the base-dir is discovered via the `files/` directory (no `--base-dir` needed) |
 | `myfiles ls` | prints each versioned tracked file as a target path with a leading `/` (gitignored files are hidden) |
 | `deploy --root-dir /tmp/sandbox` | symlinks are created under `/tmp/sandbox` instead of `/` |
-| `myfiles diff /etc/UPower/UPower.conf` | same as `diff -Naur <base-dir>/etc/UPower/UPower.conf /etc/UPower/UPower.conf` |
+| `myfiles diff /etc/UPower/UPower.conf` | prints a `diff -Naur` of the two files ordered by modification date: the older one as `-`, the newer one as `+` |
 | `status` when an intermediate directory of a target is a valid symlink into `base-dir` | healthy: nothing reported, exit code `0` |
 | `capture <dir>` when the directory is fully managed (managed symlinks, or regular files identical to their tracked copy) | converted to a dir-link: the directory removed, `<dir> -> base-dir/<rel>` created |
 | `capture <dir>` when the directory contains drift (a file differing from its tracked copy) | refused (exit `1`) unless `--force` (then the system content wins) |
