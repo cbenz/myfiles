@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterator
@@ -1855,6 +1856,23 @@ def _capture_remote_scan(base_dir: str, hosts: list[str], dry_run: bool) -> int:
     return 0 if rc == 2 else rc
 
 
+def _file_mode(path: str) -> int:
+    """Return the permission bits of a local file (the classic nine bits)."""
+    return stat.S_IMODE(os.stat(path).st_mode) & 0o777
+
+
+def _remote_mode_differs(host: str, remote_path: str, local_path: str) -> bool:
+    """Return ``True`` when the remote mode is known and differs from the local one.
+
+    ``False`` when the remote mode cannot be read (non-GNU host, missing file)
+    or the local file is absent: the mode is then left out of the comparison.
+    """
+    remote_m = remote.remote_mode(host, remote_path)
+    if remote_m is None or not os.path.isfile(local_path):
+        return False
+    return remote_m != _file_mode(local_path)
+
+
 def _plan_remote_download(
     host: str,
     remote_path: str,
@@ -1862,13 +1880,16 @@ def _plan_remote_download(
     actions: list[Action],
     infos: list[str],
 ) -> None:
-    """Plan copying a remote file into the repo (only when the content differs)."""
+    """Plan copying a remote file into the repo (when content or mode differs).
+
+    The tracked file receives the remote file's permissions.
+    """
     remote_h = remote.remote_hash(host, remote_path)
     if remote_h is None:
         infos.append(f"skip (not on remote): {remote.format_remote(host, remote_path)}")
         return
     local_h = hash_file(tracked) if os.path.isfile(tracked) else None
-    if remote_h == local_h:
+    if remote_h == local_h and not _remote_mode_differs(host, remote_path, tracked):
         infos.append(f"skip (identical): {remote.format_remote(host, remote_path)}")
         return
     actions.append(
@@ -1886,9 +1907,13 @@ def _plan_remote_upload(
     actions: list[Action],
     infos: list[str],
 ) -> None:
-    """Plan copying a tracked remote file to the host (only when it differs)."""
+    """Plan copying a tracked remote file to the host (when content or mode differs).
+
+    The remote file receives the tracked file's permissions.
+    """
     local_h = hash_file(tracked)
-    if remote.remote_hash(host, remote_path) == local_h:
+    remote_h = remote.remote_hash(host, remote_path)
+    if remote_h == local_h and not _remote_mode_differs(host, remote_path, tracked):
         infos.append(f"skip (identical): {remote.format_remote(host, remote_path)}")
         return
     actions.append(
@@ -1901,12 +1926,14 @@ def _plan_remote_upload(
 
 def _apply_remote_download(host: str, remote_path: str, tracked: str) -> None:
     _makedirs(os.path.dirname(tracked))
-    remote.remote_download(host, remote_path, tracked)
+    remote.remote_download(
+        host, remote_path, tracked, remote.remote_mode(host, remote_path)
+    )
 
 
 def _apply_remote_upload(host: str, remote_path: str, tracked: str) -> None:
     remote.remote_mkdirs(host, os.path.dirname(remote_path))
-    remote.remote_upload(tracked, host, remote_path)
+    remote.remote_upload(tracked, host, remote_path, _file_mode(tracked))
 
 
 def _remote_sel(

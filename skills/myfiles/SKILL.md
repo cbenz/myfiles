@@ -116,7 +116,7 @@ Lists the versioned files (targets with a leading `/`), one per line, honoring `
 ## Remote SSH hosts (`remotes/`)
 
 - Connection details are delegated to SSH (`ssh <host>` must resolve the host).
-- **No symlinks on a remote**: files are **copied** host ↔ repo, **only when their SHA-256 differs**.
+- **No symlinks on a remote**: files are **copied** host ↔ repo, **only when their SHA-256 differs** (a mode-only difference is also resynchronized). Copies preserve permissions (the executable bit round-trips; `0600`/`setuid` are out of scope since git only stores `100644`/`100755`).
 - `--remotes` is **unified** on `capture`/`deploy`/`status`/`fix`/`ls`: `nargs="*"`, takes **0 to N host names** (no value = every host). An unknown host (no `remotes/<host>`) is an error.
 - `capture host:/path` = copy host → `remotes/host` if it differs (`skip (identical)` otherwise); `capture --remotes host` = **recapture** every known file of the host that differs on it.
 - `deploy --remotes [hosts]` = copy repo → host if it differs (remote parents created).

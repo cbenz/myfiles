@@ -91,6 +91,24 @@ def remote_mtime(host: str, path: str) -> float | None:
         return None
 
 
+def remote_mode(host: str, path: str) -> int | None:
+    """Return the permission bits of the remote file (``None`` if unavailable).
+
+    Only the classic nine permission bits are returned: the setuid/setgid/sticky
+    bits are dropped (they cannot be stored by git, and copying them around is
+    out of scope). ``None`` is returned when the file is missing or the host
+    does not answer ``stat -c %a`` (non-GNU ``stat``), in which case permissions
+    are left untouched.
+    """
+    result = _ssh(host, f"stat -c %a {shlex.quote(path)}")
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip(), 8) & 0o777
+    except ValueError:
+        return None
+
+
 def remote_walk(host: str, path: str) -> list[str]:
     """Return the absolute remote paths of the regular files under ``path``."""
     result = _ssh(host, f"find {shlex.quote(path)} -type f")
@@ -112,8 +130,13 @@ def remote_mkdirs(host: str, path: str) -> None:
         )
 
 
-def remote_download(host: str, remote_path: str, local_path: str) -> None:
-    """Download a remote file to ``local_path`` (binary-safe)."""
+def remote_download(
+    host: str, remote_path: str, local_path: str, mode: int | None = None
+) -> None:
+    """Download a remote file to ``local_path`` (binary-safe).
+
+    When ``mode`` is given, ``local_path`` receives those permission bits.
+    """
     quoted = shlex.quote(remote_path)
     with open(local_path, "wb") as f:
         result = subprocess.run(
@@ -127,14 +150,26 @@ def remote_download(host: str, remote_path: str, local_path: str) -> None:
             f"cannot download {format_remote(host, remote_path)}: "
             f"{result.stderr.decode(errors='replace').strip()}"
         )
+    if mode is not None:
+        os.chmod(local_path, mode & 0o777)
 
 
-def remote_upload(local_path: str, host: str, remote_path: str) -> None:
-    """Upload ``local_path`` to a remote file (binary-safe)."""
+def remote_upload(
+    local_path: str, host: str, remote_path: str, mode: int | None = None
+) -> None:
+    """Upload ``local_path`` to a remote file (binary-safe).
+
+    When ``mode`` is given, the remote file receives those permission bits: the
+    ``chmod`` is chained after the copy, so a single SSH command (and a single
+    round-trip) is used, the content still flowing through stdin.
+    """
     quoted = shlex.quote(remote_path)
+    command = f"cat > {quoted}"
+    if mode is not None:
+        command += f" && chmod {mode & 0o777:o} {quoted}"
     with open(local_path, "rb") as f:
         result = subprocess.run(
-            ["ssh", host, f"cat > {quoted}"],
+            ["ssh", host, command],
             check=False,
             stdin=f,
             capture_output=True,

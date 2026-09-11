@@ -7,6 +7,8 @@ maps to ``<tmp>/fake-remote/<host>/<rel>``.
 
 import os
 import shutil
+import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -53,6 +55,12 @@ def fake_hosts(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
             return None
         return os.path.getmtime(path)
 
+    def fake_mode(host: str, rpath: str) -> int | None:
+        path = mapped(host, rpath)
+        if not os.path.isfile(path):
+            return None
+        return stat.S_IMODE(os.stat(path).st_mode) & 0o777
+
     def fake_walk(host: str, rpath: str) -> list[str]:
         base = mapped(host, rpath)
         if not os.path.isdir(base):
@@ -65,14 +73,22 @@ def fake_hosts(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
                 out.append(rpath.rstrip("/") + "/" + sub)
         return sorted(out)
 
-    def fake_download(host: str, rpath: str, local_path: str) -> None:
+    def fake_download(
+        host: str, rpath: str, local_path: str, mode: int | None = None
+    ) -> None:
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         shutil.copyfile(mapped(host, rpath), local_path)
+        if mode is not None:
+            os.chmod(local_path, mode)
 
-    def fake_upload(local_path: str, host: str, rpath: str) -> None:
+    def fake_upload(
+        local_path: str, host: str, rpath: str, mode: int | None = None
+    ) -> None:
         dst = mapped(host, rpath)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copyfile(local_path, dst)
+        if mode is not None:
+            os.chmod(dst, mode)
 
     def fake_mkdirs(host: str, rpath: str) -> None:
         os.makedirs(mapped(host, rpath), exist_ok=True)
@@ -81,6 +97,7 @@ def fake_hosts(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     monkeypatch.setattr(remote, "remote_isdir", fake_isdir)
     monkeypatch.setattr(remote, "remote_hash", fake_hash)
     monkeypatch.setattr(remote, "remote_mtime", fake_mtime)
+    monkeypatch.setattr(remote, "remote_mode", fake_mode)
     monkeypatch.setattr(remote, "remote_walk", fake_walk)
     monkeypatch.setattr(remote, "remote_download", fake_download)
     monkeypatch.setattr(remote, "remote_upload", fake_upload)
@@ -694,3 +711,213 @@ def test_deploy_remotes_at_cli_without_paths(tmp_path: Path, fake_hosts: Path) -
 
     assert main(["deploy", "--remotes", "-d", str(base_dir)]) == 0
     assert (fake_hosts / "ender3" / "etc" / "motd").read_text() == "tracked"
+
+
+# --------------------------------------------------------------------------- #
+# permission preservation
+# --------------------------------------------------------------------------- #
+
+
+def _mode(path: Path) -> int:
+    """Return the permission bits of ``path`` (the classic 9 bits)."""
+    return stat.S_IMODE(path.stat().st_mode) & 0o777
+
+
+def test_deploy_remote_preserves_executable_mode(
+    tmp_path: Path, fake_hosts: Path
+) -> None:
+    """Repo -> host: the remote file receives the tracked file's permissions."""
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    script = "#!/bin/sh\nip link set wlan0 down\n"
+    tracked = place_remote(base_dir, "ender3", "usr/local/sbin/wifi-roam-force", script)
+    tracked.chmod(0o755)  # what git records as 100755
+    target = host_file(
+        fake_hosts, "ender3", "usr/local/sbin/wifi-roam-force", "old script"
+    )
+    target.chmod(0o644)
+
+    assert (
+        commands.deploy(
+            str(base_dir), ["ender3:/usr/local/sbin/wifi-roam-force"], False, False
+        )
+        == 0
+    )
+    assert target.read_text() == script
+    assert _mode(target) == 0o755
+
+
+def test_deploy_remote_missing_file_gets_executable_mode(
+    tmp_path: Path, fake_hosts: Path
+) -> None:
+    """A file absent on the host is created with the tracked permissions."""
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    tracked = place_remote(base_dir, "ender3", "usr/local/sbin/tool", "x")
+    tracked.chmod(0o755)
+
+    assert (
+        commands.deploy(str(base_dir), ["ender3:/usr/local/sbin/tool"], False, False)
+        == 0
+    )
+    assert _mode(fake_hosts / "ender3" / "usr" / "local" / "sbin" / "tool") == 0o755
+
+
+def test_deploy_remote_resyncs_mode_when_content_identical(
+    tmp_path: Path, fake_hosts: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Identical content but a different mode: the mode is resynchronized."""
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    tracked = place_remote(base_dir, "ender3", "etc/motd", "same")
+    tracked.chmod(0o755)
+    target = host_file(fake_hosts, "ender3", "etc/motd", "same")
+    target.chmod(0o644)
+
+    assert commands.deploy(str(base_dir), ["ender3:/etc/motd"], False, False) == 0
+    assert target.read_text() == "same"
+    assert _mode(target) == 0o755
+    assert "skip (identical)" not in capsys.readouterr().out
+
+
+def test_deploy_remote_skips_identical_with_same_mode(
+    tmp_path: Path, fake_hosts: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Identical content and mode: nothing is copied (idempotence)."""
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    tracked = place_remote(base_dir, "ender3", "etc/motd", "same")
+    tracked.chmod(0o644)
+    target = host_file(fake_hosts, "ender3", "etc/motd", "same")
+    target.chmod(0o644)
+
+    assert commands.deploy(str(base_dir), ["ender3:/etc/motd"], False, False) == 0
+    assert "skip (identical)" in capsys.readouterr().out
+
+
+def test_capture_remote_preserves_executable_mode(
+    tmp_path: Path, fake_hosts: Path
+) -> None:
+    """Host -> repo: the tracked file receives the remote permissions."""
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    target = host_file(fake_hosts, "ender3", "usr/local/sbin/tool", "#!/bin/sh\n")
+    target.chmod(0o755)
+
+    assert (
+        commands.capture(
+            str(base_dir), ["ender3:/usr/local/sbin/tool"], [], False, False
+        )
+        == 0
+    )
+    tracked = base_dir / "remotes" / "ender3" / "usr" / "local" / "sbin" / "tool"
+    assert tracked.read_text() == "#!/bin/sh\n"
+    assert _mode(tracked) == 0o755
+
+
+def test_capture_remote_resyncs_mode_when_content_identical(
+    tmp_path: Path, fake_hosts: Path
+) -> None:
+    """Identical content but a different mode: the mode is resynchronized."""
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    tracked = place_remote(base_dir, "ender3", "etc/motd", "same")
+    tracked.chmod(0o644)
+    target = host_file(fake_hosts, "ender3", "etc/motd", "same")
+    target.chmod(0o755)
+
+    assert commands.capture(str(base_dir), ["ender3:/etc/motd"], [], False, False) == 0
+    assert tracked.read_text() == "same"
+    assert _mode(tracked) == 0o755
+
+
+def test_remote_mode_unavailable_falls_back(
+    tmp_path: Path,
+    fake_hosts: Path,
+    monkeypatch: MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A host that cannot report modes degrades to the previous behavior."""
+
+    def unavailable_mode(host: str, rpath: str) -> int | None:
+        return None
+
+    monkeypatch.setattr(remote, "remote_mode", unavailable_mode)
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    tracked = place_remote(base_dir, "ender3", "etc/motd", "old")
+    tracked.chmod(0o644)
+    target = host_file(fake_hosts, "ender3", "etc/motd", "new")
+    target.chmod(0o755)
+
+    # A differing file is still copied, but no chmod is attempted.
+    assert commands.capture(str(base_dir), ["ender3:/etc/motd"], [], False, False) == 0
+    assert tracked.read_text() == "new"
+    assert _mode(tracked) == 0o644
+
+    # Identical content: skipped, no failure (the mode cannot be compared).
+    assert commands.capture(str(base_dir), ["ender3:/etc/motd"], [], False, False) == 0
+    assert "skip (identical)" in capsys.readouterr().out
+
+
+def test_remote_mode_parses_octal_and_drops_special_bits(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """``stat -c %a`` output is parsed as octal; setuid is out of scope."""
+
+    def fake_ssh(host: str, command: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["ssh"], 0, "4755\n", "")
+
+    monkeypatch.setattr(remote, "_ssh", fake_ssh)
+    assert remote.remote_mode("ender3", "/x") == 0o755
+
+    def failing_ssh(host: str, command: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["ssh"], 1, "", "stat: illegal option")
+
+    monkeypatch.setattr(remote, "_ssh", failing_ssh)
+    assert remote.remote_mode("ender3", "/x") is None
+
+
+def test_remote_upload_chains_chmod_in_ssh_command(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """The chmod is chained to the copy (one SSH command, binary-safe stdin)."""
+    local = tmp_path / "tool"
+    local.write_text("x")
+    local.chmod(0o755)
+    calls: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(remote.subprocess, "run", fake_run)
+    remote.remote_upload(str(local), "ender3", "/usr/local/sbin/tool", 0o755)
+
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[0] == "ssh" and argv[1] == "ender3"
+    assert "cat > /usr/local/sbin/tool" in argv[2]
+    assert "chmod 755 /usr/local/sbin/tool" in argv[2]
+
+
+def test_remote_upload_without_mode_has_no_chmod(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Without a mode, the command is exactly the historical one."""
+    local = tmp_path / "tool"
+    local.write_text("x")
+    calls: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(remote.subprocess, "run", fake_run)
+    remote.remote_upload(str(local), "ender3", "/etc/motd")
+
+    assert "chmod" not in calls[0][2]

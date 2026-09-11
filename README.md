@@ -35,7 +35,7 @@ remotes/ender3/home/admin/printer_data/config/printer.cfg
 ```
 
 - The host is resolved through your SSH configuration (`ssh <host>` must work, e.g. `Host ender3` in `~/.ssh/config.d/home`).
-- No symlinks on a remote: files are **copied** (host → repo for `capture`, repo → host for `deploy`), **only when their content differs** (SHA-256).
+- No symlinks on a remote: files are **copied** (host → repo for `capture`, repo → host for `deploy`), **only when their content or permissions differ** (content by SHA-256). Copies preserve the source's permissions, so an executable script stays executable; git only records the executable bit, so `0600`/`setuid` are out of scope.
 - A remote path is written `{host}:/path` and accepted anywhere a path is.
 - The `--remotes` option is **unified** on `capture`, `deploy`, `status`, `fix` and `ls`: it takes **zero or more host names** (`--remotes [<host>...]`) — no value = every host, one or more = only those hosts.
 

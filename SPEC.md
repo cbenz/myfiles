@@ -85,10 +85,19 @@ myfiles can also version files living on other machines, reached over SSH. Remot
 Rules:
 
 - All connection details are delegated to the user's SSH configuration: `ssh <host>` must resolve the host (e.g. `Host ender3` in `~/.ssh/config.d/home`).
-- There are **no symlinks on a remote host**: files are **copied** in one direction or the other — `capture` copies host → repo, `deploy` copies repo → host — and **only when their content differs**.
-- All comparisons are done **by SHA-256 hash** (a file is copied only when the two hashes differ).
+- There are **no symlinks on a remote host**: files are **copied** in one direction or the other — `capture` copies host → repo, `deploy` copies repo → host — and **only when their content or permissions differ**.
+- All content comparisons are done **by SHA-256 hash** (a file is copied only when the two hashes differ). A file with identical content but a different mode is copied again, so its permissions are resynchronized (see *Permissions* below).
 - A remote path is written `{host}:/abs/path` (e.g. `ender3:/home/admin/printer_data/config/printer.cfg`). Every command that accepts file or directory names also accepts this syntax, equivalent to the corresponding tracked path under `remotes/<host>`.
 - The `--remotes` option is **unified** across `capture`, `deploy`, `status`, `fix` and `ls`: it takes **zero or more host names** (`--remotes [<host>...]`). With no value it applies to every host; with one or more, it restricts to those hosts. An unknown host (no `remotes/<host>` directory) is an error.
+
+### Permissions
+
+A copy preserves the **permissions** of its source, so an executable script stays executable:
+
+- **`deploy`** (repo → host): the remote file receives the tracked file's permission bits. The `chmod` is chained to the copy (`cat > <path> && chmod <mode> <path>`), so a single SSH round-trip is used and the content still flows through stdin (binary-safe).
+- **`capture`** (host → repo): the tracked file receives the remote file's permission bits (a local `chmod` after the copy).
+- The remote mode is read with `stat -c %a`. When the host cannot answer it (non-GNU `stat`) or the file is absent, the mode is ignored: the copy happens without a `chmod`, exactly as before.
+- **Limitations** — git only records the **executable bit** (blob modes `100644`/`100755`); after a `git clone`, other bits are lost. Exotic modes (`0600`, `setuid`, `setgid`, `sticky`) are therefore **out of scope**: only the nine permission bits are considered (`setuid`/`setgid`/`sticky` are dropped when reading a remote mode), and **no side metadata** is stored. A mode change made directly on the host is not reported by `status --remotes`/`fix --remotes` (they compare content only): it is resynchronized by the next `capture`/`deploy` (including `--remotes` scans).
 
 ## Ignoring files
 
@@ -162,8 +171,8 @@ Behavior:
 
 **Remote capture** — a `{host}:/path` argument (or `--remotes`) captures files from a remote host into `remotes/<host>`:
 
-- `capture {host}:/path` copies the remote file (or, for a directory, every file under it) into `remotes/<host>/…`, **only when the content differs** (compared by SHA-256 hash); identical files are reported as `skip (identical)`. Nothing is moved and no symlink is created — the remote copy stays in place and the repo gains a copy.
-- `--remotes [<host>...]` **recaptures every known remote file** of the given host(s), or of every host when no value is given: each file under `remotes/<host>` whose remote content differs is copied back from the host (same "only if differs" rule). A known file absent on the host is reported as `skip (not on remote)`. An unknown host (no `remotes/<host>` directory) is an error.
+- `capture {host}:/path` copies the remote file (or, for a directory, every file under it) into `remotes/<host>/…`, **only when the content or the mode differs** (content compared by SHA-256 hash; the tracked file receives the remote permissions); identical files are reported as `skip (identical)`. Nothing is moved and no symlink is created — the remote copy stays in place and the repo gains a copy.
+- `--remotes [<host>...]` **recaptures every known remote file** of the given host(s), or of every host when no value is given: each file under `remotes/<host>` whose remote content or mode differs is copied back from the host (same "only if differs" rule). A known file absent on the host is reported as `skip (not on remote)`. An unknown host (no `remotes/<host>` directory) is an error.
 - A positional `{host}:/path` is processed even without `--remotes`; a positional path that would be swallowed by argparse's optional-value syntax after `--remotes` is recognized by its leading `/` (or `host:/` prefix) and treated as a PATH.
 - `--remotes` makes `PATH` optional: `capture --remotes` alone scans every host. The remote plans are printed and confirmed like local captures (`--dry-run` previews them).
 
@@ -203,7 +212,7 @@ Usage: myfiles deploy <path>... [--force] [--remotes [<host>...]] [--dry-run]
 Behavior:
 
 - A `PATH` is required unless `--remotes` is given (there is no implicit "deploy everything"). Each `PATH` is a tracked file or directory (target path or path inside the base directory); a requested path with no tracked file is reported as `skip <target>: not a tracked file`.
-- **Remote deploy** — a `{host}:/path`, a path inside `remotes/`, or a root-relative `remotes/...` path deploys the tracked remote file(s) **to the host** instead: each tracked file under `remotes/<host>` is copied to the host (its parent directories are created remotely), **only when its content differs** (SHA-256). A tracked file missing on the host is uploaded. A directory path deploys every tracked file underneath it.
+- **Remote deploy** — a `{host}:/path`, a path inside `remotes/`, or a root-relative `remotes/...` path deploys the tracked remote file(s) **to the host** instead: each tracked file under `remotes/<host>` is copied to the host (its parent directories are created remotely), **only when its content or mode differs** (content compared by SHA-256; the remote file receives the tracked permissions). A tracked file missing on the host is uploaded. A directory path deploys every tracked file underneath it.
 - **`--remotes [<host>...]`** (unified option: no value = every host) deploys **every known remote file** of the given host(s) to the host — each tracked file under `remotes/<host>` is copied only when it differs (missing remote parents are created). It makes `PATH` optional (`myfiles deploy --remotes ender3` alone deploys all of ender3). An unknown host is an error. When `--remotes` and `PATH`s are both given, the scan and the explicit paths are both processed.
 - For each tracked file, the parent directories of the target location are created with `mkdir -p` if they don't exist.
 - An **absolute** symlink is created from the target location to the tracked file.
@@ -486,6 +495,8 @@ myfiles diff /path/to/base-dir/etc/UPower/UPower.conf
 | `myfiles ignore ~/.config/zsh/.antidote` | appends `files/home/user/.config/zsh/.antidote` to `.gitignore` (created with a managed-by-myfiles header) |
 | `myfiles ignore <path>` when the entry is already there | prints `nothing to ignore`, no change |
 | `capture --root-dir /tmp/sandbox` of a directory under the sandbox | allowed; the directory is mirrored relative to the sandbox root |
+| `deploy` of a tracked executable (`100755`) to a host whose file is not executable | the remote file is executable (`0755`), even when its content was already identical |
+| `capture` of an executable remote file | the tracked file is executable (`100755` recorded by git) |
 | `myfiles deploy` without any `PATH` | argparse error (paths are required), exit code `2` |
 | `myfiles fix` when the status is clean | prints `no problems to fix`, exit code `0` |
 | `myfiles fix` on a `dangling`/`foreign` symlink | default `deploy` replaces it with the managed link |
