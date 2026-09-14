@@ -1,12 +1,29 @@
 """Tests for the interactive ``fix`` command and CLI argument requirements."""
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
 
 from myfiles import commands
+
+
+def _init_git_repo(path: Path) -> None:
+    """Make ``path`` a Git repository able to commit (identity configured)."""
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "test@example.com"],
+        ["config", "user.name", "Test"],
+    ):
+        subprocess.run(["git", "-C", str(path), *args], check=False)
+
+
+def _commit_all(path: Path) -> None:
+    """Stage and commit everything under ``path``."""
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=False)
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "init"], check=False)
 
 
 def _confirm_yes(*args: object, **kwargs: object) -> bool:
@@ -30,7 +47,13 @@ def place_tracked(base_dir: Path, target: Path) -> Path:
 def _fixed_choice(choice: str):
     """Return a fake ``_ask_fix`` that always picks ``choice``."""
 
-    def fake(label: str, target: str, allowed: list[str], default: str | None) -> str:
+    def fake(
+        label: str,
+        target: str,
+        allowed: list[str],
+        default: str | None,
+        note: str | None = None,
+    ) -> str:
         return choice
 
     return fake
@@ -42,6 +65,18 @@ def _scripted_input(answers: list[str]):
     iterator = iter(answers)
 
     def fake(prompt: str) -> str:
+        return next(iterator)
+
+    return fake
+
+
+def _recording_input(prompts: list[str], answers: list[str]):
+    """Return a fake ``input`` that records each prompt and yields the answers."""
+
+    iterator = iter(answers)
+
+    def fake(prompt: str) -> str:
+        prompts.append(prompt)
         return next(iterator)
 
     return fake
@@ -255,14 +290,95 @@ def test_fix_drift_asks_until_valid_choice(
     tracked.write_text("old")
     target = root / "etc" / "app.conf"
     target.parent.mkdir(parents=True)
-    target.write_text("new")  # drift, and no default for drift
-    # Empty and invalid answers re-ask; "c" finally picks capture.
+    target.write_text("new")  # drift
+    # Equal modification dates: no default. Empty and invalid answers re-ask;
+    # "c" finally picks capture.
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    os.utime(target, (1_600_000_000, 1_600_000_000))
     monkeypatch.setattr("builtins.input", _scripted_input(["", "x", "c"]))
 
     assert commands.fix(str(base_dir), False, root=str(root)) == 0
     assert tracked.read_text() == "new"
     assert os.path.islink(target)
     assert os.path.realpath(target) == os.path.realpath(tracked)
+
+
+def test_fix_drift_newer_system_file_defaults_to_capture(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    root = tmp_path / "root"
+    tracked = base_dir / "files" / "etc" / "app.conf"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("tracked-old")
+    target = root / "etc" / "app.conf"
+    target.parent.mkdir(parents=True)
+    target.write_text("system-new")
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    os.utime(target, (1_700_000_000, 1_700_000_000))  # the system file is newer
+    prompts: list[str] = []
+    # Empty input accepts the default, which must be `capture` (system wins).
+    monkeypatch.setattr("builtins.input", _recording_input(prompts, [""]))
+
+    assert commands.fix(str(base_dir), False, root=str(root)) == 0
+    assert tracked.read_text() == "system-new"
+    assert os.path.realpath(target) == os.path.realpath(tracked)
+    assert "system file is more recent" in prompts[0]
+    assert "-> default: capture" in prompts[0]
+    assert "[c=capture (default), d=deploy, i=diff, s=skip]" in prompts[0]
+
+
+def test_fix_drift_newer_tracked_file_defaults_to_deploy(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    root = tmp_path / "root"
+    tracked = base_dir / "files" / "etc" / "app.conf"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("tracked-new")
+    target = root / "etc" / "app.conf"
+    target.parent.mkdir(parents=True)
+    target.write_text("system-old")
+    os.utime(tracked, (1_700_000_000, 1_700_000_000))  # the tracked file is newer
+    os.utime(target, (1_600_000_000, 1_600_000_000))
+    prompts: list[str] = []
+    monkeypatch.setattr("builtins.input", _recording_input(prompts, [""]))
+
+    assert commands.fix(str(base_dir), False, root=str(root)) == 0
+    # Deploy: tracked wins, the system content is kept as a backup.
+    assert os.path.islink(target)
+    assert os.path.realpath(target) == os.path.realpath(tracked)
+    assert (root / "etc" / "app.conf.bak").read_text() == "system-old"
+    assert "tracked file is more recent" in prompts[0]
+    assert "-> default: deploy" in prompts[0]
+    assert "[d=deploy (default), c=capture, i=diff, s=skip]" in prompts[0]
+
+
+def test_fix_drift_equal_dates_require_an_explicit_choice(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    root = tmp_path / "root"
+    tracked = base_dir / "files" / "etc" / "app.conf"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("tracked-old")
+    target = root / "etc" / "app.conf"
+    target.parent.mkdir(parents=True)
+    target.write_text("system-new")
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    os.utime(target, (1_600_000_000, 1_600_000_000))  # same date: no default
+    prompts: list[str] = []
+    monkeypatch.setattr("builtins.input", _recording_input(prompts, ["", "c"]))
+
+    assert commands.fix(str(base_dir), False, root=str(root)) == 0
+    # The empty answer re-asked instead of picking a default.
+    assert len(prompts) == 2
+    assert "no default" in prompts[0]
+    assert "(default)" not in prompts[0]
+    assert tracked.read_text() == "system-new"
 
 
 def test_fix_ctrl_c_aborts_everything(
@@ -408,7 +524,55 @@ def test_fix_defaults_applies_deploy_without_asking(
     assert os.path.realpath(target) == os.path.realpath(tracked)
 
 
-def test_fix_defaults_skips_drift(
+def test_fix_defaults_captures_newer_drift(tmp_path: Path) -> None:
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    root = tmp_path / "root"
+    tracked = base_dir / "files" / "etc" / "app.conf"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("tracked-old")
+    target = root / "etc" / "app.conf"
+    target.parent.mkdir(parents=True)
+    target.write_text("system-new")
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    os.utime(target, (1_700_000_000, 1_700_000_000))  # system newer -> capture
+
+    assert commands.fix(str(base_dir), False, defaults=True, root=str(root)) == 0
+    # The newer (system) content became the tracked copy, linked back in place.
+    assert tracked.read_text() == "system-new"
+    assert os.path.realpath(target) == os.path.realpath(tracked)
+
+
+def test_fix_defaults_skips_uncommitted_tracked_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A capture must never destroy a tracked version Git does not have yet."""
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    _init_git_repo(base_dir)
+    root = tmp_path / "root"
+    tracked = base_dir / "files" / "etc" / "app.conf"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("tracked-committed")
+    _commit_all(base_dir)
+    tracked.write_text("tracked-dirty")  # uncommitted: no backup exists
+    target = root / "etc" / "app.conf"
+    target.parent.mkdir(parents=True)
+    target.write_text("system-new")
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    os.utime(target, (1_700_000_000, 1_700_000_000))  # system newer -> capture
+
+    assert commands.fix(str(base_dir), False, defaults=True, root=str(root)) == 0
+    out = capsys.readouterr().out
+    assert "skip (uncommitted changes)" in out
+    assert "commit it first" in out
+    # Nothing was overwritten or linked.
+    assert tracked.read_text() == "tracked-dirty"
+    assert target.read_text() == "system-new"
+    assert not os.path.islink(target)
+
+
+def test_fix_defaults_skips_drift_with_equal_dates(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     base_dir = tmp_path / "repo"
@@ -419,7 +583,9 @@ def test_fix_defaults_skips_drift(
     tracked.write_text("old")
     target = root / "etc" / "app.conf"
     target.parent.mkdir(parents=True)
-    target.write_text("new")  # drift: no default
+    target.write_text("new")  # drift with equal dates: no default
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    os.utime(target, (1_600_000_000, 1_600_000_000))
 
     assert commands.fix(str(base_dir), False, defaults=True, root=str(root)) == 0
     out = capsys.readouterr().out

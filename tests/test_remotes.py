@@ -93,6 +93,10 @@ def fake_hosts(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     def fake_mkdirs(host: str, rpath: str) -> None:
         os.makedirs(mapped(host, rpath), exist_ok=True)
 
+    def fake_backup(host: str, rpath: str) -> None:
+        src = mapped(host, rpath)
+        shutil.copyfile(src, str(src) + ".bak")
+
     monkeypatch.setattr(remote, "remote_lexists", fake_lexists)
     monkeypatch.setattr(remote, "remote_isdir", fake_isdir)
     monkeypatch.setattr(remote, "remote_hash", fake_hash)
@@ -102,7 +106,24 @@ def fake_hosts(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     monkeypatch.setattr(remote, "remote_download", fake_download)
     monkeypatch.setattr(remote, "remote_upload", fake_upload)
     monkeypatch.setattr(remote, "remote_mkdirs", fake_mkdirs)
+    monkeypatch.setattr(remote, "remote_backup", fake_backup)
     return root
+
+
+def _init_git_repo(path: Path) -> None:
+    """Make ``path`` a Git repository able to commit (identity configured)."""
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "test@example.com"],
+        ["config", "user.name", "Test"],
+    ):
+        subprocess.run(["git", "-C", str(path), *args], check=False)
+
+
+def _commit_all(path: Path) -> None:
+    """Stage and commit everything under ``path``."""
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=False)
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "init"], check=False)
 
 
 def host_file(fake_hosts: Path, host: str, rel: str, content: str) -> Path:
@@ -124,8 +145,26 @@ def place_remote(base_dir: Path, host: str, rel: str, content: str) -> Path:
 def _fixed_choice(choice: str):
     """Return a fake ``_ask_fix`` that always picks ``choice``."""
 
-    def fake(label: str, target: str, allowed: list[str], default: str | None) -> str:
+    def fake(
+        label: str,
+        target: str,
+        allowed: list[str],
+        default: str | None,
+        note: str | None = None,
+    ) -> str:
         return choice
+
+    return fake
+
+
+def _recording_input(prompts: list[str], answers: list[str]):
+    """Return a fake ``input`` that records each prompt and yields the answers."""
+
+    iterator = iter(answers)
+
+    def fake(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(iterator)
 
     return fake
 
@@ -529,6 +568,58 @@ def test_fix_remote_defaults_deploys_missing(tmp_path: Path, fake_hosts: Path) -
     assert (fake_hosts / "ender3" / "etc" / "motd").read_text() == "x"
 
 
+def test_fix_remote_drift_newer_remote_defaults_to_capture(
+    tmp_path: Path, fake_hosts: Path, monkeypatch: MonkeyPatch
+) -> None:
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    tracked = place_remote(base_dir, "ender3", "etc/motd", "tracked-old")
+    target = host_file(fake_hosts, "ender3", "etc/motd", "remote-new")
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    os.utime(target, (1_700_000_000, 1_700_000_000))  # the remote file is newer
+    prompts: list[str] = []
+    # Empty input accepts the default, which must be `capture` (remote wins).
+    monkeypatch.setattr("builtins.input", _recording_input(prompts, [""]))
+
+    assert commands.fix(str(base_dir), False, remotes=[]) == 0
+    assert tracked.read_text() == "remote-new"
+    assert "remote file is more recent" in prompts[0]
+    assert "-> default: capture" in prompts[0]
+    assert "[c=capture (default), d=deploy, i=diff, s=skip]" in prompts[0]
+
+
+def test_fix_remote_drift_newer_tracked_defaults_to_deploy(
+    tmp_path: Path, fake_hosts: Path, monkeypatch: MonkeyPatch
+) -> None:
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    tracked = place_remote(base_dir, "ender3", "etc/motd", "tracked-new")
+    target = host_file(fake_hosts, "ender3", "etc/motd", "remote-old")
+    os.utime(tracked, (1_700_000_000, 1_700_000_000))  # the tracked file is newer
+    os.utime(target, (1_600_000_000, 1_600_000_000))
+    prompts: list[str] = []
+    monkeypatch.setattr("builtins.input", _recording_input(prompts, [""]))
+
+    assert commands.fix(str(base_dir), False, remotes=[]) == 0
+    assert target.read_text() == "tracked-new"
+    assert "tracked file is more recent" in prompts[0]
+    assert "-> default: deploy" in prompts[0]
+
+
+def test_fix_remote_defaults_captures_newer_remote(
+    tmp_path: Path, fake_hosts: Path
+) -> None:
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    tracked = place_remote(base_dir, "ender3", "etc/motd", "tracked-old")
+    target = host_file(fake_hosts, "ender3", "etc/motd", "remote-new")
+    os.utime(tracked, (1_600_000_000, 1_600_000_000))
+    os.utime(target, (1_700_000_000, 1_700_000_000))  # remote newer -> capture
+
+    assert commands.fix(str(base_dir), False, remotes=[], defaults=True) == 0
+    assert tracked.read_text() == "remote-new"
+
+
 def test_fix_remote_no_problems(
     tmp_path: Path, fake_hosts: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -646,6 +737,58 @@ def test_fix_remotes_filters_hosts(
 # --------------------------------------------------------------------------- #
 # deploy --remotes (0..N host names)
 # --------------------------------------------------------------------------- #
+
+
+def test_fix_remote_capture_skips_dirty_tracked_file(
+    tmp_path: Path,
+    fake_hosts: Path,
+    monkeypatch: MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    _init_git_repo(base_dir)
+    tracked = place_remote(base_dir, "ender3", "etc/motd", "tracked-committed")
+    _commit_all(base_dir)
+    # The tracked copy has uncommitted changes: overwriting it would destroy
+    # the only copy of that version (git is the backup), so capture skips it.
+    tracked.write_text("tracked-dirty")
+    host_file(fake_hosts, "ender3", "etc/motd", "remote-new")
+    monkeypatch.setattr(commands, "_ask_fix", _fixed_choice("capture"))
+
+    assert commands.fix(str(base_dir), False, remotes=[]) == 0
+    out = capsys.readouterr().out
+    assert "skip (uncommitted changes)" in out
+    assert "commit it first" in out
+    assert tracked.read_text() == "tracked-dirty"
+
+
+def test_deploy_remotes_backs_up_overwritten_file(
+    tmp_path: Path, fake_hosts: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    place_remote(base_dir, "ender3", "etc/motd", "tracked")
+    host_file(fake_hosts, "ender3", "etc/motd", "remote-old")
+
+    assert commands.deploy(str(base_dir), [], False, False, remotes=[]) == 0
+    assert (fake_hosts / "ender3" / "etc" / "motd").read_text() == "tracked"
+    # The overwritten remote file is kept next to it, on the host.
+    assert (fake_hosts / "ender3" / "etc" / "motd.bak").read_text() == "remote-old"
+    assert "backup: ender3:/etc/motd.bak" in capsys.readouterr().out
+
+
+def test_deploy_remotes_no_backup_when_file_absent(
+    tmp_path: Path, fake_hosts: Path
+) -> None:
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    place_remote(base_dir, "ender3", "etc/motd", "tracked")
+
+    assert commands.deploy(str(base_dir), [], False, False, remotes=[]) == 0
+    assert (fake_hosts / "ender3" / "etc" / "motd").read_text() == "tracked"
+    # Nothing was overwritten: no backup is created.
+    assert not (fake_hosts / "ender3" / "etc" / "motd.bak").exists()
 
 
 def test_deploy_remotes_scan_all(

@@ -67,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-f",
         "--force",
         action="store_true",
-        help="Overwrite an existing tracked file with different content.",
+        help="Overwrite an existing tracked file with different content (skipped when that file has uncommitted changes: commit it first, the commit is the backup).",
     )
     capture_parser.add_argument(
         "--remotes",
@@ -93,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-f",
         "--force",
         action="store_true",
-        help="Replace a conflicting target file even if it differs.",
+        help="Replace a conflicting target file even if it differs (the original is kept as <target>.bak; on a host, as <remote path>.bak).",
     )
     deploy_parser.add_argument(
         "--remotes",
@@ -149,7 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     fix_parser = sub.add_parser(
         "fix",
-        help="Interactively resolve the status problems (deploy or capture per item).",
+        help="Interactively resolve the status problems (for a drift, the most recently modified side is proposed by default: capture if the system/remote file is newer, deploy if the tracked file is).",
     )
     add_base_dir(fix_parser)
     add_dry_run(fix_parser)
@@ -163,7 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
     fix_parser.add_argument(
         "--defaults",
         action="store_true",
-        help="Non-interactive: apply the default action of every problem (drift is skipped: it has no default).",
+        help="Non-interactive: apply the default action of every problem (for a drift, the most recently modified side wins: capture if the system/remote file is newer, deploy if the tracked file is; equal/unknown dates are skipped).",
     )
     fix_parser.add_argument(
         "--only",

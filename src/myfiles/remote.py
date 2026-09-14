@@ -130,6 +130,21 @@ def remote_mkdirs(host: str, path: str) -> None:
         )
 
 
+def remote_backup(host: str, path: str) -> None:
+    """Copy the remote file at ``path`` to ``<path>.bak`` on the host.
+
+    Used before overwriting a remote file: unlike the tracked files (whose
+    previous content is kept by Git), the remote filesystem is not versioned
+    by myfiles, so the overwritten content is kept next to it.
+    """
+    quoted = shlex.quote(path)
+    result = _ssh(host, f"cp -p {quoted} {quoted}.bak")
+    if result.returncode != 0:
+        raise RemoteError(
+            f"cannot back up {format_remote(host, path)}: {result.stderr.strip()}"
+        )
+
+
 def remote_download(
     host: str, remote_path: str, local_path: str, mode: int | None = None
 ) -> None:

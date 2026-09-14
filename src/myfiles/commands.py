@@ -842,17 +842,21 @@ def fix(
 
     Interactively, for each problem the user picks an action among the ones
     adapted to the problem type: ``deploy`` (tracked file is the authority),
-    ``capture`` (the system file becomes the tracked one) or ``skip``. ``drift``
-    has no default (an explicit choice is required); ``diff`` shows the
-    difference first. Each chosen change is confirmed (``[Y/n]``) and applied
-    immediately, item by item, like running the corresponding command by hand;
-    interrupting with Ctrl-C keeps the already-applied items.
+    ``capture`` (the system file becomes the tracked one) or ``skip``. For
+    ``drift`` the actions are ordered by modification date: the most recently
+    modified side is the default (``capture`` when the system file is the
+    newest, ``deploy`` when the tracked file is) and the prompt states it
+    explicitly; equal or unreadable dates leave no default (an explicit choice
+    is required). ``diff`` shows the difference first. Each chosen change is
+    confirmed (``[Y/n]``) and applied immediately, item by item, like running
+    the corresponding command by hand; interrupting with Ctrl-C keeps the
+    already-applied items.
 
     With ``paths``, only the given file(s)/directory(ies) are processed; with
     ``only``, only the problems of the given type(s) (e.g. ``dangling``,
     ``drift``). ``defaults`` runs non-interactively and applies the default
-    action of every problem (problems without a default — ``drift`` — and
-    non-auto-fixable ones are skipped). With ``--remotes`` (optional host
+    action of every problem (a ``drift`` whose dates are equal or unknown, and
+    non-auto-fixable problems, are skipped). With ``--remotes`` (optional host
     names, or every host when no value), the remote differences are fixed
     instead (deploy/capture/diff per file).
     """
@@ -878,7 +882,7 @@ def fix(
     rc = 0
     if defaults:
         for label, target, rels in problems:
-            _allowed, default = _fix_options(label)
+            _allowed, default, _note = _local_fix_options(label, target, rels, base_dir)
             if default is None:
                 print(f"skip {display_path(target)}: {label} (no default)")
                 continue
@@ -898,12 +902,12 @@ def fix(
             if not first:
                 print()
             first = False
-            allowed, default = _fix_options(label)
+            allowed, default, note = _local_fix_options(label, target, rels, base_dir)
             if allowed == ["skip"]:
                 print(f"skip {display_path(target)}: {label} (not auto-fixable)")
                 continue
             while True:
-                choice = _ask_fix(label, target, allowed, default)
+                choice = _ask_fix(label, target, allowed, default, note)
                 if choice == "diff":
                     _run_diff(
                         os.path.join(base_dir, rels[0]),
@@ -955,32 +959,103 @@ def _list_problems(base_dir: str, root: str) -> list[tuple[str, str, list[str]]]
     return problems
 
 
-def _fix_options(label: str) -> tuple[list[str], str | None]:
-    """Return (allowed actions, default) for a problem label.
+def _format_timestamp(mtime: float) -> str:
+    """Format a modification timestamp for display (local timezone)."""
+    tz = datetime.now().astimezone().tzinfo
+    return datetime.fromtimestamp(mtime, tz).strftime("%Y-%m-%d %H:%M:%S")
 
-    ``default`` is ``None`` when an explicit choice is required (no safe
-    default); ``skip`` is the default when the problem is not auto-fixable.
+
+def _mtime_or_none(path: str) -> float | None:
+    """Return the modification time of ``path``, or ``None`` when unreadable."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def _recent_note(which: str, mtime: float, action: str) -> str:
+    """Return the one-line explanation of a date-based ``drift`` default."""
+    return f"{which} is more recent ({_format_timestamp(mtime)}) -> default: {action}"
+
+
+def _fix_options(
+    label: str,
+    tracked_mtime: float | None = None,
+    other_mtime: float | None = None,
+    other_name: str = "system file",
+) -> tuple[list[str], str | None, str | None]:
+    """Return ``(allowed actions, default, note)`` for a problem label.
+
+    ``drift`` is the only problem where two versions of the file exist and
+    disagree, so its actions are ordered by modification date — the most
+    recently modified file is the authority: ``capture`` first when the
+    ``other_name`` file is the newest (the system/remote content wins),
+    ``deploy`` first when the tracked file is (the tracked content wins). When
+    the dates are equal or unreadable there is no default (an explicit choice
+    is required). ``note`` is a one-line explanation shown with the prompt
+    (``None`` when there is nothing to explain); ``skip`` is the default for
+    the non-auto-fixable ``directory``.
     """
     if label == "drift":
-        # No default: the system file and the tracked one disagree, the user
-        # must explicitly choose which is authoritative (deploy = tracked,
-        # capture = system).
-        return (["deploy", "capture", "diff", "skip"], None)
+        if tracked_mtime is not None and other_mtime is not None:
+            if other_mtime > tracked_mtime:
+                return (
+                    ["capture", "deploy", "diff", "skip"],
+                    "capture",
+                    _recent_note(f"the {other_name}", other_mtime, "capture"),
+                )
+            if tracked_mtime > other_mtime:
+                return (
+                    ["deploy", "capture", "diff", "skip"],
+                    "deploy",
+                    _recent_note("the tracked file", tracked_mtime, "deploy"),
+                )
+        return (
+            ["deploy", "capture", "diff", "skip"],
+            None,
+            "modification dates are equal or unknown -> no default: choose explicitly",
+        )
     if label == "directory":
-        return (["skip"], "skip")
-    return (["deploy", "skip"], "deploy")
+        return (["skip"], "skip", None)
+    return (["deploy", "skip"], "deploy", None)
+
+
+def _local_fix_options(
+    label: str, target: str, rels: list[str], base_dir: str
+) -> tuple[list[str], str | None, str | None]:
+    """Return ``(allowed, default, note)`` for a local problem.
+
+    Only ``drift`` needs the two modification dates (the system file and the
+    tracked copy); the other labels have a fixed default.
+    """
+    if label != "drift":
+        return _fix_options(label)
+    return _fix_options(
+        label,
+        tracked_mtime=_mtime_or_none(os.path.join(base_dir, rels[0])),
+        other_mtime=_mtime_or_none(target),
+        other_name="system file",
+    )
 
 
 class _FixAborted(Exception):
     """Raised when the user interrupts the interactive ``fix`` loop (Ctrl-C)."""
 
 
-def _ask_fix(label: str, target: str, allowed: list[str], default: str | None) -> str:
+def _ask_fix(
+    label: str,
+    target: str,
+    allowed: list[str],
+    default: str | None,
+    note: str | None = None,
+) -> str:
     """Ask which action to take for one problem; return a choice from ``allowed``.
 
-    Empty input picks ``default`` when set; without a default it re-asks (and
-    prints a hint). ``EOFError``/``KeyboardInterrupt`` abort the whole
-    session by raising ``_FixAborted``.
+    ``note`` (when given) is a line printed under the problem explaining the
+    default (e.g. which file is the most recent). Empty input picks ``default``
+    when set; without a default it re-asks (and prints a hint).
+    ``EOFError``/``KeyboardInterrupt`` abort the whole session by raising
+    ``_FixAborted``.
     """
     keys = {"deploy": "d", "capture": "c", "diff": "i", "skip": "s"}
     # Show the default action first, then the others in their given order.
@@ -995,7 +1070,10 @@ def _ask_fix(label: str, target: str, allowed: list[str], default: str | None) -
         if action == default:
             text += " (default)"
         parts.append(text)
-    prompt = f"{label:<12}{display_path(target)}\n[{', '.join(parts)}] "
+    header = f"{label:<12}{display_path(target)}"
+    if note is not None:
+        header += f"\n{' ' * 12}{note}"
+    prompt = f"{header}\n[{', '.join(parts)}] "
     while True:
         try:
             answer = input(prompt).strip().lower()
@@ -1158,7 +1236,9 @@ def _plan_capture(
             base_dir, raw, force, ignore, infos, errors, root, extra_actions
         )
     else:
-        _plan_file(base_dir, raw, target_to_relative(raw, root), force, plan, errors)
+        _plan_file(
+            base_dir, raw, target_to_relative(raw, root), force, plan, infos, errors
+        )
 
 
 def _plan_capture_dir(
@@ -1218,6 +1298,10 @@ def _plan_capture_dir(
             )
             return
         else:
+            note = _uncommitted_dir_note(src, base_dir, dest, ignore)
+            if note is not None:
+                infos.append(note)
+                return
             extra_actions.append(
                 Action(
                     f"capture {display_path(src)} -> {display_path(base_dir)}/{rel} as a dir-link (forced: system content wins)",
@@ -1344,12 +1428,59 @@ def _move_ignored(src: str, dest: str, base_dir: str, ignore: list[str]) -> None
         _move(full, dd)
 
 
+def _uncommitted_note(git_dir: str, rel: str) -> str | None:
+    """Return a skip message when overwriting ``git_dir/rel`` would lose an uncommitted version.
+
+    A tracked file's previous content is only recoverable from Git (myfiles
+    writes no ``.bak`` for it), so a capture refuses to overwrite a tracked
+    file that has uncommitted changes: the user must commit it first (myfiles
+    never commits on its own). ``git_dir`` is the directory the Git command
+    runs in (the base-dir, or ``remotes/<host>`` for a remote file); ``rel``
+    is the tracked file's path relative to it. ``None`` when the overwrite is
+    safe (clean file, or no Git repository at all).
+    """
+    if not is_dirty(git_dir, rel):
+        return None
+    return (
+        f"skip (uncommitted changes): {display_path(os.path.join(git_dir, rel))} "
+        "would lose its uncommitted changes; commit it first"
+    )
+
+
+def _uncommitted_dir_note(
+    src: str, base_dir: str, dest: str, ignore: list[str]
+) -> str | None:
+    """Return a skip message when a forced directory capture would overwrite uncommitted files.
+
+    ``_apply_capture_dir_force`` copies the real files under ``src`` over the
+    tracked copies in ``dest``; any of them that has uncommitted changes must
+    be committed first, otherwise the whole directory capture is skipped (a
+    dir-link cannot be built while one of its files is left out).
+    """
+    for dirpath, _dirnames, filenames in os.walk(src, followlinks=False):
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, src)
+            if os.path.islink(full):
+                continue  # managed symlink: its tracked file is already in dest
+            if _excluded(rel, ignore, is_dir=False):
+                continue  # ignored entry: moved as-is, not overwritten
+            tracked = os.path.join(dest, rel)
+            if not os.path.exists(tracked) or same_content(full, tracked):
+                continue  # nothing is overwritten
+            note = _uncommitted_note(base_dir, os.path.relpath(tracked, base_dir))
+            if note is not None:
+                return note
+    return None
+
+
 def _plan_file(
     base_dir: str,
     real_src: str,
     rel: str,
     force: bool,
     plan: list[tuple[str, str, bool]],
+    infos: list[str],
     errors: list[str],
 ) -> None:
     dest = os.path.join(base_dir, rel)
@@ -1360,10 +1491,9 @@ def _plan_file(
         if same_content(real_src, dest):
             plan.append((real_src, rel, True))
         elif force:
-            if is_dirty(base_dir, rel):
-                errors.append(
-                    f"{dest} has uncommitted changes in git; commit or restore it before using --force"
-                )
+            note = _uncommitted_note(base_dir, rel)
+            if note is not None:
+                infos.append(note)
             else:
                 plan.append((real_src, rel, False))
         else:
@@ -1818,10 +1948,10 @@ def _capture_remote_paths(
             for f in files:
                 sub = os.path.relpath(f, remote_path)
                 _plan_remote_download(
-                    host, f, os.path.join(tracked, sub), actions, infos
+                    base_dir, host, f, os.path.join(tracked, sub), actions, infos
                 )
         else:
-            _plan_remote_download(host, remote_path, tracked, actions, infos)
+            _plan_remote_download(base_dir, host, remote_path, tracked, actions, infos)
     rc = _execute(actions, infos, errors, dry_run)
     return 0 if rc == 2 else rc
 
@@ -1851,7 +1981,7 @@ def _capture_remote_scan(base_dir: str, hosts: list[str], dry_run: bool) -> int:
                 f"skip (not on remote): {remote.format_remote(host, remote_path)}"
             )
             continue
-        _plan_remote_download(host, remote_path, tracked, actions, infos)
+        _plan_remote_download(base_dir, host, remote_path, tracked, actions, infos)
     rc = _execute(actions, infos, errors, dry_run)
     return 0 if rc == 2 else rc
 
@@ -1874,6 +2004,7 @@ def _remote_mode_differs(host: str, remote_path: str, local_path: str) -> bool:
 
 
 def _plan_remote_download(
+    base_dir: str,
     host: str,
     remote_path: str,
     tracked: str,
@@ -1882,7 +2013,9 @@ def _plan_remote_download(
 ) -> None:
     """Plan copying a remote file into the repo (when content or mode differs).
 
-    The tracked file receives the remote file's permissions.
+    The tracked file receives the remote file's permissions. The overwritten
+    tracked content is only recoverable from Git, so the copy is skipped while
+    the tracked file has uncommitted changes (commit it first).
     """
     remote_h = remote.remote_hash(host, remote_path)
     if remote_h is None:
@@ -1891,6 +2024,12 @@ def _plan_remote_download(
     local_h = hash_file(tracked) if os.path.isfile(tracked) else None
     if remote_h == local_h and not _remote_mode_differs(host, remote_path, tracked):
         infos.append(f"skip (identical): {remote.format_remote(host, remote_path)}")
+        return
+    note = _uncommitted_note(
+        remote.host_dir(base_dir, host), remote.remote_rel(remote_path)
+    )
+    if note is not None:
+        infos.append(note)
         return
     actions.append(
         Action(
@@ -1909,17 +2048,27 @@ def _plan_remote_upload(
 ) -> None:
     """Plan copying a tracked remote file to the host (when content or mode differs).
 
-    The remote file receives the tracked file's permissions.
+    The remote file receives the tracked file's permissions. The remote
+    filesystem is not versioned by myfiles, so an existing remote file is
+    copied to ``<remote path>.bak`` on the host before being overwritten.
     """
     local_h = hash_file(tracked)
     remote_h = remote.remote_hash(host, remote_path)
     if remote_h == local_h and not _remote_mode_differs(host, remote_path, tracked):
         infos.append(f"skip (identical): {remote.format_remote(host, remote_path)}")
         return
+    backup = remote_h is not None  # the copy overwrites an existing remote file
+    note = (
+        f" (backup: {remote.format_remote(host, remote_path + '.bak')})"
+        if backup
+        else ""
+    )
     actions.append(
         Action(
-            f"copy {display_path(tracked)} -> {remote.format_remote(host, remote_path)}",
-            lambda h=host, r=remote_path, t=tracked: _apply_remote_upload(h, r, t),
+            f"copy {display_path(tracked)} -> {remote.format_remote(host, remote_path)}{note}",
+            lambda h=host, r=remote_path, t=tracked, b=backup: _apply_remote_upload(
+                h, r, t, b
+            ),
         )
     )
 
@@ -1931,8 +2080,12 @@ def _apply_remote_download(host: str, remote_path: str, tracked: str) -> None:
     )
 
 
-def _apply_remote_upload(host: str, remote_path: str, tracked: str) -> None:
+def _apply_remote_upload(
+    host: str, remote_path: str, tracked: str, backup: bool = False
+) -> None:
     remote.remote_mkdirs(host, os.path.dirname(remote_path))
+    if backup:
+        remote.remote_backup(host, remote_path)
     remote.remote_upload(tracked, host, remote_path, _file_mode(tracked))
 
 
@@ -2116,10 +2269,7 @@ def _print_remote_dates(local_m: float, remote_m: float | None) -> None:
     """Print the local/remote modification dates, marking the most recent."""
 
     def fmt(m: float | None) -> str:
-        if m is None:
-            return "missing"
-        tz = datetime.now().astimezone().tzinfo
-        return datetime.fromtimestamp(m, tz).strftime("%Y-%m-%d %H:%M:%S")
+        return "missing" if m is None else _format_timestamp(m)
 
     local_s = fmt(local_m)
     remote_s = fmt(remote_m)
@@ -2163,7 +2313,7 @@ def _fix_remote(
     rc = 0
     if defaults:
         for label, host, rel in problems:
-            _allowed, default = _remote_fix_options(label)
+            _allowed, default, _note = _remote_fix_options(base_dir, label, host, rel)
             if default is None:
                 print(
                     f"skip {remote.format_remote(host, '/' + rel)}: {label} (no default)"
@@ -2183,10 +2333,10 @@ def _fix_remote(
             if not first:
                 print()
             first = False
-            allowed, default = _remote_fix_options(label)
+            allowed, default, note = _remote_fix_options(base_dir, label, host, rel)
             target = remote.format_remote(host, "/" + rel)
             while True:
-                choice = _ask_fix(label, target, allowed, default)
+                choice = _ask_fix(label, target, allowed, default, note)
                 if choice == "diff":
                     _run_remote_diff(
                         host, "/" + rel, _remote_tracked(base_dir, host, rel)
@@ -2231,13 +2381,22 @@ def _remote_problems(
     return problems
 
 
-def _remote_fix_options(label: str) -> tuple[list[str], str | None]:
-    """Return (allowed actions, default) for a remote problem label."""
-    if label == "drift":
-        return (["deploy", "capture", "diff", "skip"], None)
-    if label == "missing":
-        return (["deploy", "skip"], "deploy")
-    return (["skip"], "skip")
+def _remote_fix_options(
+    base_dir: str, label: str, host: str, rel: str
+) -> tuple[list[str], str | None, str | None]:
+    """Return ``(allowed, default, note)`` for a remote problem.
+
+    Only ``drift`` needs the two modification dates (the remote file and the
+    tracked copy); the other labels have a fixed default.
+    """
+    if label != "drift":
+        return _fix_options(label)
+    return _fix_options(
+        label,
+        tracked_mtime=_mtime_or_none(_remote_tracked(base_dir, host, rel)),
+        other_mtime=remote.remote_mtime(host, "/" + rel),
+        other_name="remote file",
+    )
 
 
 def _remote_fix_actions(
@@ -2252,5 +2411,5 @@ def _remote_fix_actions(
     if choice == "deploy":
         _plan_remote_upload(host, remote_path, tracked, actions, infos)
     elif choice == "capture":
-        _plan_remote_download(host, remote_path, tracked, actions, infos)
+        _plan_remote_download(base_dir, host, remote_path, tracked, actions, infos)
     return actions, infos, errors

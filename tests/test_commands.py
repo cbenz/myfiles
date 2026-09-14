@@ -32,6 +32,22 @@ def place_tracked(base_dir: Path, target: Path) -> Path:
     return dest
 
 
+def _init_git_repo(path: Path) -> None:
+    """Make ``path`` a Git repository able to commit (identity configured)."""
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "test@example.com"],
+        ["config", "user.name", "Test"],
+    ):
+        subprocess.run(["git", "-C", str(path), *args], check=False)
+
+
+def _commit_all(path: Path) -> None:
+    """Stage and commit everything under ``path``."""
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=False)
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "init"], check=False)
+
+
 def test_capture_file_deploy_eject_roundtrip(tmp_path: Path) -> None:
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
@@ -909,22 +925,18 @@ def test_capture_force_overwrites_tracked_file(tmp_path: Path) -> None:
     assert not (base_dir / "files" / "etc" / "app.conf.bak").exists()
 
 
-def test_capture_force_refuses_dirty_tracked_file(tmp_path: Path) -> None:
+def test_capture_force_skips_dirty_tracked_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     base_dir = tmp_path / "repo"
     base_dir.mkdir()
-    subprocess.run(["git", "-C", str(base_dir), "init", "-q"], check=False)
-    subprocess.run(
-        ["git", "-C", str(base_dir), "config", "user.email", "t@t"], check=False
-    )
-    subprocess.run(
-        ["git", "-C", str(base_dir), "config", "user.name", "T"], check=False
-    )
+    _init_git_repo(base_dir)
     tracked = base_dir / "files" / "etc" / "app.conf"
     tracked.parent.mkdir(parents=True)
     tracked.write_text("committed")
-    subprocess.run(["git", "-C", str(base_dir), "add", "-A"], check=False)
-    subprocess.run(["git", "-C", str(base_dir), "commit", "-qm", "init"], check=False)
-    # Make the tracked file dirty (uncommitted modification).
+    _commit_all(base_dir)
+    # Make the tracked file dirty (uncommitted modification): overwriting it
+    # would destroy the only copy of that version, so capture skips it.
     tracked.write_text("dirty")
     source = tmp_path / "etc" / "app.conf"
     source.parent.mkdir(parents=True)
@@ -934,11 +946,45 @@ def test_capture_force_refuses_dirty_tracked_file(tmp_path: Path) -> None:
         commands.capture(
             str(base_dir), [str(source)], [], True, False, root=str(tmp_path)
         )
-        == 1
+        == 0
     )
+    out = capsys.readouterr().out
+    assert "skip (uncommitted changes)" in out
+    assert "commit it first" in out
     # The dirty tracked file is left untouched, so no version is lost.
     assert tracked.read_text() == "dirty"
     assert source.read_text() == "new"
+    assert not os.path.islink(source)
+
+
+def test_capture_dir_force_skips_dirty_tracked_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base_dir = tmp_path / "repo"
+    base_dir.mkdir()
+    _init_git_repo(base_dir)
+    tracked_dir = base_dir / "files" / "home" / "u" / ".config" / "app"
+    tracked_dir.mkdir(parents=True)
+    (tracked_dir / "a.conf").write_text("tracked-committed")
+    (tracked_dir / "b.conf").write_text("tracked-b")
+    _commit_all(base_dir)
+    (tracked_dir / "a.conf").write_text("tracked-dirty")  # uncommitted
+    root = tmp_path / "root"
+    source = root / "home" / "u" / ".config" / "app"
+    source.mkdir(parents=True)
+    (source / "a.conf").write_text("system-a")
+
+    assert (
+        commands.capture(str(base_dir), [str(source)], [], True, False, root=str(root))
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "skip (uncommitted changes)" in out
+    # Nothing was converted: the directory is still a real directory, and the
+    # dirty tracked file was not overwritten.
+    assert not os.path.islink(source)
+    assert (source / "a.conf").read_text() == "system-a"
+    assert (tracked_dir / "a.conf").read_text() == "tracked-dirty"
 
 
 def test_capture_does_not_commit_to_git_repo(

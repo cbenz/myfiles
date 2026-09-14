@@ -9,7 +9,7 @@ Instead of chezmoi, dotdrop or yadm:
 - **Symlinks, always.** Every tracked file is deployed as an **absolute** symlink pointing straight into the repository (`~/.config/htop/htoprc -> ~/Dev/config/dotfiles/files/home/cbenz/.config/htop/htoprc`). No copies, no templates: what's in the repo is exactly what's used. (chezmoi copies by default; dotdrop and yadm manage alternate views or profiles.)
 - **Dir-links are allowed.** A directory can be managed as one unit: `~/.config/zsh -> files/home/cbenz/.config/zsh`. Anything a program writes there lands directly in the repo — essential for programs that rewrite their files atomically (gitk, htop) and would replace a plain file symlink.
 - **No DSL, no git wrapper.** myfiles is neither a git wrapper (yadm) nor a templating/profiles engine (chezmoi, dotdrop): just a `files/` layout mirroring the system, and you run `git commit` yourself.
-- **Safety first.** No data loss: conflicts are refused without `--force`, and `eject` guarantees you are never locked in.
+- **Safety first.** No data loss: conflicts are refused without `--force`, an overwritten file is always backed up (Git for your tracked files, `.bak` next to a system or remote file), and `eject` guarantees you are never locked in.
 - **Simple and readable.** No config file: what git versions is exactly the contents of the `files/` directory, and `myfiles ignore` fills in `.gitignore`.
 
 ## How it works
@@ -24,7 +24,7 @@ The **base-dir** (`files/`) mirrors the system: the leading `/` of a target path
 
 - **Symlink**: `~/.config/htop/htoprc -> ~/Dev/config/dotfiles/files/home/cbenz/.config/htop/htoprc`.
 - **Dir-link**: a whole directory is a symlink (`~/.config/zsh -> .../files/home/cbenz/.config/zsh`); files programs write there land in the repo and are git-ignored via `myfiles ignore`.
-- **Git**: myfiles never creates commits — version `files/` yourself.
+- **Git**: myfiles never creates commits — version `files/` yourself. That commit is also the backup of a tracked file: an overwrite is **skipped** while the file has uncommitted changes (commit it first).
 
 ## Remote hosts (`remotes/`)
 
@@ -35,7 +35,7 @@ remotes/ender3/home/admin/printer_data/config/printer.cfg
 ```
 
 - The host is resolved through your SSH configuration (`ssh <host>` must work, e.g. `Host ender3` in `~/.ssh/config.d/home`).
-- No symlinks on a remote: files are **copied** (host → repo for `capture`, repo → host for `deploy`), **only when their content or permissions differ** (content by SHA-256). Copies preserve the source's permissions, so an executable script stays executable; git only records the executable bit, so `0600`/`setuid` are out of scope.
+- No symlinks on a remote: files are **copied** (host → repo for `capture`, repo → host for `deploy`), **only when their content or permissions differ** (content by SHA-256). Copies preserve the source's permissions, so an executable script stays executable; git only records the executable bit, so `0600`/`setuid` are out of scope. An overwritten remote file is kept on the host as `<path>.bak`, and a tracked file is only overwritten when it is committed (no uncommitted change).
 - A remote path is written `{host}:/path` and accepted anywhere a path is.
 - The `--remotes` option is **unified** on `capture`, `deploy`, `status`, `fix` and `ls`: it takes **zero or more host names** (`--remotes [<host>...]`) — no value = every host, one or more = only those hosts.
 
@@ -108,7 +108,8 @@ myfiles capture <path>... [--ignore <glob>...] [--force] [--remotes [<host>...]]
 - A **file** is moved into `base-dir` and linked.
 - A **directory** is captured as a **dir-link**: the whole directory becomes a single symlink.
 - `--ignore <glob>` (repeatable, gitignore syntax) appends the matched entries to the repository's `.gitignore` — for transient files (history, caches, vendored clones) that should never be versioned.
-- `--force`: on drift, the system content becomes the new tracked copy.
+- `--force`: on drift, the system content becomes the new tracked copy — **skipped** when that tracked file has uncommitted changes (commit it first: the commit is the backup).
+- An overwrite never loses content: your tracked files are protected by Git (commit first), a replaced system file is kept as `<target>.bak`.
 
 ```bash
 # a single file
@@ -177,7 +178,8 @@ myfiles fix [<path>...] [--defaults] [--only <errtype>...] [--remotes [<host>...
 ```
 
 - `--only <errtype>` (repeatable): only resolve that problem type (`dangling`, `drift`, …).
-- `--defaults`: non-interactive — applies each problem's default action; `drift` (no default) is skipped.
+- Each problem proposes a default: `deploy` (the tracked file wins), except a `drift` where the **most recently modified file wins** — `capture` when the system file is newer, `deploy` when the tracked file is. The prompt states it explicitly (`the system file is more recent (…) -> default: capture`); equal or unreadable dates leave no default, so an explicit choice is required.
+- `--defaults`: non-interactive — applies each problem's default action; a `drift` with equal/unknown dates is skipped.
 - Each fix is confirmed and applied immediately; `Ctrl-C` aborts the session (exit code `130`), keeping the already-applied fixes.
 
 ```bash

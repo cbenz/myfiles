@@ -86,6 +86,7 @@ Rules:
 
 - All connection details are delegated to the user's SSH configuration: `ssh <host>` must resolve the host (e.g. `Host ender3` in `~/.ssh/config.d/home`).
 - There are **no symlinks on a remote host**: files are **copied** in one direction or the other — `capture` copies host → repo, `deploy` copies repo → host — and **only when their content or permissions differ**.
+- No copy destroys content without a backup: an overwritten **remote** file is kept on the host as `<path>.bak` (see *Backups*), and an overwritten **tracked** file is only written when it has no uncommitted change (otherwise the copy is skipped).
 - All content comparisons are done **by SHA-256 hash** (a file is copied only when the two hashes differ). A file with identical content but a different mode is copied again, so its permissions are resynchronized (see *Permissions* below).
 - A remote path is written `{host}:/abs/path` (e.g. `ender3:/home/admin/printer_data/config/printer.cfg`). Every command that accepts file or directory names also accepts this syntax, equivalent to the corresponding tracked path under `remotes/<host>`.
 - The `--remotes` option is **unified** across `capture`, `deploy`, `status`, `fix` and `ls`: it takes **zero or more host names** (`--remotes [<host>...]`). With no value it applies to every host; with one or more, it restricts to those hosts. An unknown host (no `remotes/<host>` directory) is an error.
@@ -124,9 +125,19 @@ myfiles ignore ~/.config/zsh/.antidote ~/.config/htop/htop_history
 
 ## Git integration
 
-- Git is **optional**: `myfiles` works even if `base-dir` is not a Git repository.
+- Git is **optional**: `myfiles` works even if `base-dir` is not a Git repository (the commit guard below then never blocks an overwrite, and there is no backup for tracked files — use `--dry-run` to be safe).
 - `myfiles` **never creates commits** — versioning is entirely left to you (stage and commit the `base-dir` changes yourself when you want to).
-- The only Git interaction is a read-only safety check: `capture --force` refuses to overwrite a tracked file that has uncommitted changes, so no version is lost.
+- The only Git interaction is a read-only safety check: no command overwrites a **tracked** file that has uncommitted changes (see *Backups*).
+
+## Backups
+
+Nothing is overwritten without a recoverable copy of the previous content:
+
+- **Tracked files** (`base-dir/...` and `remotes/<host>/...`) — the backup is **Git**. Before overwriting one, myfiles checks that it has no uncommitted change (staged, modified or untracked all count). When it has, the overwrite is **skipped**: `skip (uncommitted changes): <tracked file> would lose its uncommitted changes; commit it first`, and nothing is changed — commit it (myfiles never commits on its own) and the overwrite becomes safe, the last commit holding the previous version. Never is a `.bak` file written inside `base-dir`: every regular file there is a tracked file, so it would be listed, deployed and reported as one.
+- **System files** — a `deploy` (including a `fix` deploy) that replaces a regular target file with different content keeps the original next to it as `<target>.bak`.
+- **Remote files** — a `deploy` to a host that overwrites an existing remote file keeps the original on the host as `<remote path>.bak` (the remote filesystem is not versioned by myfiles).
+
+Symlinks are not content: replacing a foreign/dangling symlink (or an intermediate directory symlink) with the managed link destroys no file content and needs no backup.
 
 ## Global options
 
@@ -160,13 +171,13 @@ Behavior:
 - **Directory capture (dir-link)** — `capture <dir>` makes the whole directory a single managed symlink `<dir> -> base-dir/<rel>`:
   - if `<dir>` is **fully managed** (every entry is a managed symlink correctly pointing to its tracked file, or a regular file **identical** to its tracked copy — zero drift), it is converted in place: the directory is removed and replaced by the dir-link (`convert to dir-link <dir> -> base-dir/<rel>`), nothing is moved;
   - otherwise (a fresh directory with real files) the whole directory is **moved** into `base-dir` and linked back (`move-and-link <dir> -> base-dir/<rel> (dir-link)`);
-  - if `base-dir/<rel>` already holds tracked files **and** `<dir>` contains drift (a real file **whose content differs** from its tracked copy, a foreign/misplaced symlink, a managed link whose tracked file is missing), capture is **refused** unless `--force`: run `myfiles fix` to resolve the drift first, or `--force` to adopt the system content (the drifted files overwrite the tracked copies, then the directory is converted).
+  - if `base-dir/<rel>` already holds tracked files **and** `<dir>` contains drift (a real file **whose content differs** from its tracked copy, a foreign/misplaced symlink, a managed link whose tracked file is missing), capture is **refused** unless `--force`: run `myfiles fix` to resolve the drift first, or `--force` to adopt the system content (the drifted files overwrite the tracked copies, then the directory is converted). A forced conversion is **skipped** when one of the files it would overwrite has uncommitted changes (see *Backups*): a dir-link cannot be built while one of its files is left out.
   - with `--ignore`, the matched entries are appended to the repository's `.gitignore` (see the `--ignore` bullet); the ones that exist on disk are moved into `base-dir` so they keep working through the dir-link.
 - A symlink passed directly as `<path>` (a file symlink, not a dir-link) is resolved and its target is captured.
 - Conflict (per-file capture): if a tracked file with the same relative path already exists in `base-dir`:
   - identical content → skip;
   - different content → error, unless `--force` (then it is overwritten);
-  - different content + `--force` but the tracked file has uncommitted git changes → error (commit or restore it first, so no version is lost).
+  - different content + `--force` but the tracked file has uncommitted git changes → **skipped** (`skip (uncommitted changes): … would lose its uncommitted changes; commit it first`), nothing is changed: commit it and re-run, the last commit is the backup.
 - Each per-file capture is reported as a single `move-and-link` operation (moved into `base-dir`, then linked back). The planned operations are printed, then confirmation is requested before applying; `--dry-run` prints them without asking or applying.
 
 **Remote capture** — a `{host}:/path` argument (or `--remotes`) captures files from a remote host into `remotes/<host>`:
@@ -410,14 +421,14 @@ Usage: myfiles fix [<path>...] [--defaults] [--only <errtype>...] [--remotes [<h
 Without arguments, `fix` offers **every** problem reported by `status`. With one or more `PATH`, only the problems of the given file(s)/directory(ies) are processed (a `PATH` can be a target path, a tracked path inside the base directory, or a root-relative path — like `eject`/`deploy`).
 
 - With `--only <errtype>` (repeatable), only the problems of the given type(s) are processed — the same labels as `status`: `dangling`, `foreign`, `elsewhere`, `not-linked`, `missing`, `drift`, `directory`. An unknown type is rejected by the CLI (exit `2`).
-- `--defaults` runs **non-interactively**: every problem is fixed with its default action (no choice, no confirmation). Problems without a default (`drift`) and non-auto-fixable ones (`directory`) are skipped and reported.
+- `--defaults` runs **non-interactively**: every problem is fixed with its default action (no choice, no confirmation). Problems without a default (a `drift` whose dates are equal or unknown) and non-auto-fixable ones (`directory`) are skipped and reported.
 
-For each problem, the available actions depend on its type, and there is a safe default (tracked files are the authority — `deploy` is never destructive of tracked content):
+For each problem, the available actions depend on its type and a default is proposed. It is `deploy` for every problem (the tracked file is the authority) except `drift`: there the **most recently modified file wins**, because a mismatch can only be resolved in favour of the version that was edited last.
 
 | Problem | Available actions | Default |
 | --- | --- | --- |
 | `dangling`, `foreign`, `elsewhere`, `not-linked`, `missing`, foreign/dangling directory symlink | `deploy`, `skip` | `deploy` |
-| `drift` | `deploy`, `capture`, `diff`, `skip` | *(none — an explicit choice is required)* |
+| `drift` | ordered by date: `capture` / `deploy` first, then `diff`, `skip` | the most recently modified file is the authority: `capture` when the system file is the newest, `deploy` when the tracked file is — *(none when the dates are equal or unknown)* |
 | `directory` | `skip` | `skip` (not auto-fixable, reported only) |
 
 Behavior:
@@ -426,7 +437,7 @@ Behavior:
 - For a dangling/foreign directory symlink problem, one `deploy` replaces the directory symlink with a real directory and links every tracked file underneath it. A valid dir-link is not a problem and is never offered.
 - For `drift`, `deploy` replaces the system file with the tracked one (the tracked copy is the authority, the drifted system file is kept as `target.bak`); `capture` moves the system file into `base-dir` (becoming the new tracked copy) and links it back; `diff` shows the difference between the two files (the sides are ordered by modification date — the older file is `-`, the newer `+`) and re-asks; `skip` leaves it alone.
 - A problem is kept only if it concerns one of the requested `PATH`s: a file is matched by its exact tracked path, a directory by everything underneath it (so fixing a directory-symlink problem deploys all its files). If no problem matches the selection, `fix` prints `no problems to fix`.
-- The answers are `d`/`deploy`, `c`/`capture`, `i`/`diff` (inspect), `s`/`skip`; empty input picks the default when there is one. `drift` has **no default**: an empty or invalid answer re-asks.
+- The answers are `d`/`deploy`, `c`/`capture`, `i`/`diff` (inspect), `s`/`skip`; empty input picks the default when there is one. For a `drift`, the default follows the modification dates: the **most recently modified file is the authority**, so the two versions are compared (the system file's `mtime` against the tracked file's) and the matching action — `capture` when the system file is the newest, `deploy` when the tracked file is — is listed first, followed by the others, with an explicit line stating which file is the most recent and which default follows (e.g. `the system file is more recent (2026-09-13 21:14:02) -> default: capture`). When the dates are equal or unreadable there is **no default**: an empty or invalid answer re-asks.
 - Each chosen change is **confirmed and applied immediately**, item by item (the items are independent): its plan is printed, then `[Y/n]` is asked exactly like running `deploy`/`capture` by hand, and the change is applied on `Y` (`N change(s) applied`) or left untouched on `n`. With `--dry-run` the plan is only previewed (no confirmation). There is no batch plan/confirmation at the end.
 - Interrupting the session (`Ctrl-C`/EOF) — at either the choice or the confirmation prompt — aborts the whole `fix` (it does not move to the next item), prints `aborted (changes already applied are kept)` and exits with code `130` — items already applied before the interruption are kept.
 - There is deliberately no `fix --all`: every change is chosen, confirmed and applied individually.
@@ -434,9 +445,9 @@ Behavior:
 **Remote fix (`--remotes [<host>...]`)** — with `--remotes` (unified option: no value = every host), `fix` resolves the remote differences (those reported by `status --remotes`) of the given host(s) instead of the local problems, with the **same REPL**:
 
 - Each differing file is offered as `drift` (remote exists but differs) or `missing` (tracked file absent on the host), labelled with its `{host}:/path`.
-- For `drift`, the actions are `deploy` (copy the tracked file to the host, the tracked copy is the authority), `capture` (copy the host file into the repo, the host content becomes the new tracked copy), `diff` (show the difference, downloading the remote file into a temporary directory) and `skip` — **no default** (an explicit choice is required), exactly like local `drift`.
+- For `drift`, the actions are `deploy` (copy the tracked file to the host, the tracked copy is the authority), `capture` (copy the host file into the repo, the host content becomes the new tracked copy), `diff` (show the difference, downloading the remote file into a temporary directory) and `skip` — ordered by modification date like local `drift` (the remote file's real `mtime` against the tracked file's): the **most recently modified side is the default** (`capture` when the remote file is the newest, `deploy` when the tracked file is), with the same explicit line before the prompt; equal or unreadable dates leave **no default** (an explicit choice is required).
 - For `missing`, the actions are `deploy` (upload the tracked file to the host, the default) and `skip`.
-- Each chosen change is confirmed and applied immediately, item by item, like local `fix`; `--defaults` applies the default action of every problem (`drift` has no default and is skipped); `Ctrl-C` aborts the whole session (already-applied items are kept).
+- Each chosen change is confirmed and applied immediately, item by item, like local `fix`; `--defaults` applies the default action of every problem (a `drift` with equal/unknown dates has no default and is skipped); `Ctrl-C` aborts the whole session (already-applied items are kept).
 
 ### `diff`
 
@@ -501,9 +512,15 @@ myfiles diff /path/to/base-dir/etc/UPower/UPower.conf
 | `myfiles fix` when the status is clean | prints `no problems to fix`, exit code `0` |
 | `myfiles fix` on a `dangling`/`foreign` symlink | default `deploy` replaces it with the managed link |
 | `myfiles fix` on a `drift` file, choosing `capture` | the system file becomes the tracked copy, linked back in place |
-| `myfiles fix` on a `drift` file, pressing Enter (no choice) | re-asks (no default), nothing is changed |
+| `myfiles fix` on a `drift` file with different dates, pressing Enter | applies the default: `capture` when the system file is the newest, `deploy` when the tracked file is |
+| `myfiles fix` on a `drift` file with equal dates, pressing Enter | re-asks (no default), nothing is changed |
 | `myfiles fix` on a foreign directory symlink | the symlink is replaced by a real directory and the files underneath are linked |
 | `myfiles fix --only dangling` | only the `dangling` problems are processed, the others are left untouched |
-| `myfiles fix --defaults` | applies the default action of each problem without asking; `drift` (no default) is skipped |
+| `myfiles fix --defaults` | applies the default action of each problem without asking; a `drift` with equal/unknown dates (no default) is skipped |
 | `myfiles fix --only bogus` | CLI rejects the unknown type, exit code `2` |
+| `capture` of a file whose tracked copy has uncommitted changes | skipped (`skip (uncommitted changes) … commit it first`), the tracked file and the system file are left untouched |
+| `capture --remotes` of a file whose tracked copy has uncommitted changes | skipped the same way, the tracked remote file is left untouched |
+| `myfiles fix --defaults` on a `drift` whose tracked copy has uncommitted changes | the `capture` default is skipped with the message, nothing is overwritten or linked |
+| `deploy` of a tracked file to a host where the file exists and differs | the remote file is replaced **and** the previous remote content is kept as `<path>.bak` on the host |
+| `deploy` of a tracked file to a host where the file does not exist | the file is uploaded, no `.bak` is created |
 | `myfiles fix --dry-run` | prints the plan without applying |
